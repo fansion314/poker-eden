@@ -1,3 +1,4 @@
+use crate::card::Card;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use uuid::Uuid;
@@ -8,23 +9,26 @@ pub type PlayerId = Uuid;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameState {
     pub room_id: RoomId,
-    pub players: HashMap<PlayerId, Player>,
-    pub player_order: VecDeque<PlayerId>,
+    pub players: HashMap<PlayerId, Player>,  // 可以根据player id查找player
+    pub player_order: VecDeque<PlayerId>,  // 玩家顺序，索引0的位置为庄家，后续玩家按顺时针顺序排列。每次结束后用rotate来切换庄家
     pub phase: GamePhase,
-    pub pot: u32,
-    pub current_player: Option<usize>,
-    pub current_pots: Vec<u32>,
+    pub pot: u32,  // 总金额，包括当前玩家的下注金额
+    pub cards: Vec<Option<Card>>,  // 5张牌，还未生成的牌用None表示。对于服务端的GameState，在本局开局时就已全部生成，对于客户端，在游戏过程中可能会收到新的牌，未知的牌用None表示
+    pub player_cards: HashMap<PlayerId, (Option<Card>, Option<Card>)>,  // 玩家的牌，同样对于服务端和客户端是不同的。
+    pub cur_player: Option<usize>,  // 当前应该行动的玩家
+    pub cur_max_pot: u32, // 当前轮最大的下注金额
+    pub cur_pots: Vec<u32>,   // 当前轮每位玩家的下注金额（对应player_order）用于判断玩家是否还需要补足筹码
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Player {
     pub id: PlayerId,
     pub nickname: String,
-    pub stack: u32,
-    pub wins: u32,
-    pub losses: u32,
+    pub stack: u32,  // 剩余筹码
+    pub wins: u32,  // 本次游戏赢的次数
+    pub losses: u32,  // 本次游戏输光全部筹码的次数
     pub state: PlayerState,
-    pub seat_id: Option<u8>,
+    pub seat_id: Option<u8>,  // 座位号（总共若干座位）由用户自己选择座位
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

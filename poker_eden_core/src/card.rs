@@ -1,3 +1,4 @@
+use rand::prelude::SliceRandom;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -61,19 +62,18 @@ pub enum HandRank {
 
 impl fmt::Display for Suit {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let symbol = match self {
+        write!(f, "{}", match self {
             Suit::Spade => "♠",
             Suit::Heart => "♥",
             Suit::Club => "♣",
             Suit::Diamond => "♦",
-        };
-        write!(f, "{}", symbol)
+        })
     }
 }
 
 impl fmt::Display for Rank {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let representation = match self {
+        write!(f, "{}", match self {
             Rank::Two => "2",
             Rank::Three => "3",
             Rank::Four => "4",
@@ -87,24 +87,69 @@ impl fmt::Display for Rank {
             Rank::Queen => "Q",
             Rank::King => "K",
             Rank::Ace => "A",
-        };
-        write!(f, "{}", representation)
+        })
     }
 }
 
 impl fmt::Display for Card {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}{}", self.rank, self.suit)
+        write!(f, "{}{}", self.suit, self.rank)
     }
+}
+
+// --- 随机牌组生成 ---
+
+/// 创建一副完整的 52 张扑克牌
+fn create_deck() -> Vec<Card> {
+    let suits = [Suit::Spade, Suit::Heart, Suit::Club, Suit::Diamond];
+    let ranks = [
+        Rank::Two, Rank::Three, Rank::Four, Rank::Five, Rank::Six, Rank::Seven,
+        Rank::Eight, Rank::Nine, Rank::Ten, Rank::Jack, Rank::Queen, Rank::King, Rank::Ace,
+    ];
+    let mut deck = Vec::with_capacity(52);
+    for &suit in &suits {
+        for &rank in &ranks {
+            deck.push(Card { rank, suit });
+        }
+    }
+    deck
+}
+
+/// 从一副新牌中随机生成并返回 k 张牌
+pub fn generate_random_hand(k: usize) -> Vec<Card> {
+    let mut deck = create_deck();
+    let mut rng = rand::rng();
+    deck.shuffle(&mut rng);
+    deck.into_iter().take(k).collect()
 }
 
 // --- 牌型评估逻辑 ---
 
-/// 评估一手 5 张牌的牌型
+/// 从 5 到 7 张牌中找出最优的 5 张牌组合牌力
+/// 这是德州扑克规则的核心评估函数
 ///
 /// # Panics
-/// 如果传入的牌不是 5 张，则会 panic。
-pub fn evaluate_hand(hand: &[Card]) -> HandRank {
+/// 如果牌数少于 5 或多于 7，则会 panic。
+pub fn find_best_hand(all_cards: &[Card]) -> HandRank {
+    let card_count = all_cards.len();
+    assert!(card_count >= 5 && card_count <= 7, "牌数必须在5到7张之间");
+
+    if card_count == 5 {
+        return evaluate_5_card_hand(all_cards);
+    }
+
+    // 通过生成所有5张牌的组合来找到最佳手牌。
+    // 这是唯一确保正确性的方法，因为贪心算法（如移除最小的牌）可能会破坏顺子或同花。
+    let combinations = get_combinations(all_cards, 5);
+
+    combinations.into_iter()
+        .map(|hand| evaluate_5_card_hand(&hand))
+        .max() // HandRank 派生了 Ord，可以直接找到最大的
+        .unwrap() // 因为我们知道至少会有一个组合，所以 unwrap 是安全的
+}
+
+/// 评估一手 5 张牌的牌型 (原 evaluate_hand 函数)
+fn evaluate_5_card_hand(hand: &[Card]) -> HandRank {
     assert_eq!(hand.len(), 5, "评估的牌必须是5张");
 
     let mut cards = hand.to_vec();
@@ -116,7 +161,7 @@ pub fn evaluate_hand(hand: &[Card]) -> HandRank {
     let is_flush = cards.windows(2).all(|w| w[0].suit == w[1].suit);
 
     // 2. 检查顺子
-    let is_straight = ranks.windows(2).all(|w| w[0] as i32 == w[1] as i32 + 1)
+    let is_straight = ranks.windows(2).all(|w| w[0] as u8 == w[1] as u8 + 1)
         // 特殊情况: A-2-3-4-5
         || ranks == [Rank::Ace, Rank::Five, Rank::Four, Rank::Three, Rank::Two];
 
@@ -179,77 +224,178 @@ pub fn evaluate_hand(hand: &[Card]) -> HandRank {
     }
 }
 
+/// 辅助函数：从一个切片中生成所有大小为 k 的组合
+fn get_combinations<T: Clone>(data: &[T], k: usize) -> Vec<Vec<T>> {
+    if k == 0 {
+        return vec![vec![]];
+    }
+    if data.len() < k {
+        return vec![];
+    }
+
+    let mut result = vec![];
+    let (first, rest) = data.split_at(1);
+
+    // 包含第一个元素的组合
+    let mut combinations_with_first = get_combinations(rest, k - 1);
+    for combo in &mut combinations_with_first {
+        combo.insert(0, first[0].clone());
+    }
+    result.append(&mut combinations_with_first);
+
+    // 不包含第一个元素的组合
+    if data.len() > k {
+        let mut combinations_without_first = get_combinations(rest, k);
+        result.append(&mut combinations_without_first);
+    }
+
+    result
+}
+
+// --- 单元测试 ---
+
 #[cfg(test)]
 mod tests {
-    use crate::card::Rank::*;
-    use crate::card::Suit::*;
-    use crate::card::*;
+    use super::*;
+    // 导入父模块的所有内容
+    use Rank::*;
+    use Suit::*;
+
+    // 辅助函数，用于快速创建牌
+    fn card(rank: Rank, suit: Suit) -> Card {
+        Card { rank, suit }
+    }
+
+    // --- 5张牌评估测试 ---
+    #[test]
+    fn test_royal_flush() {
+        let hand = [card(Ten, Spade), card(Ace, Spade), card(Queen, Spade), card(King, Spade), card(Jack, Spade)];
+        assert_eq!(evaluate_5_card_hand(&hand), HandRank::RoyalFlush);
+    }
 
     #[test]
-    fn main() {
-        // 皇家同花顺
-        let royal_flush = vec![
-            Card { rank: Ace, suit: Spade },
-            Card { rank: King, suit: Spade },
-            Card { rank: Queen, suit: Spade },
-            Card { rank: Jack, suit: Spade },
-            Card { rank: Ten, suit: Spade },
+    fn test_straight_flush() {
+        let hand = [card(Nine, Heart), card(Ten, Heart), card(Eight, Heart), card(Jack, Heart), card(Seven, Heart)];
+        assert_eq!(evaluate_5_card_hand(&hand), HandRank::StraightFlush(Jack));
+    }
+
+    #[test]
+    fn test_ace_low_straight_flush() {
+        let hand = [card(Ace, Club), card(Two, Club), card(Three, Club), card(Four, Club), card(Five, Club)];
+        assert_eq!(evaluate_5_card_hand(&hand), HandRank::StraightFlush(Five));
+    }
+
+    #[test]
+    fn test_four_of_a_kind() {
+        let hand = [card(Ace, Spade), card(Ace, Heart), card(Ace, Diamond), card(Ace, Club), card(King, Spade)];
+        assert_eq!(evaluate_5_card_hand(&hand), HandRank::FourOfAKind(Ace, King));
+    }
+
+    #[test]
+    fn test_full_house() {
+        let hand = [card(King, Spade), card(King, Heart), card(King, Diamond), card(Queen, Club), card(Queen, Spade)];
+        assert_eq!(evaluate_5_card_hand(&hand), HandRank::FullHouse(King, Queen));
+    }
+
+    #[test]
+    fn test_flush() {
+        let hand = [card(Two, Diamond), card(Five, Diamond), card(Eight, Diamond), card(Jack, Diamond), card(Ace, Diamond)];
+        assert_eq!(evaluate_5_card_hand(&hand), HandRank::Flush(Ace, Jack, Eight, Five, Two));
+    }
+
+    #[test]
+    fn test_straight() {
+        let hand = [card(Ten, Spade), card(Nine, Heart), card(Eight, Diamond), card(Seven, Club), card(Six, Spade)];
+        assert_eq!(evaluate_5_card_hand(&hand), HandRank::Straight(Ten));
+    }
+
+    #[test]
+    fn test_ace_low_straight() {
+        let hand = [card(Ace, Spade), card(Two, Heart), card(Three, Diamond), card(Four, Club), card(Five, Spade)];
+        assert_eq!(evaluate_5_card_hand(&hand), HandRank::Straight(Five));
+    }
+
+    #[test]
+    fn test_three_of_a_kind() {
+        let hand = [card(Ten, Spade), card(Ten, Heart), card(Ten, Diamond), card(Jack, Club), card(Two, Spade)];
+        assert_eq!(evaluate_5_card_hand(&hand), HandRank::ThreeOfAKind(Ten, Jack, Two));
+    }
+
+    #[test]
+    fn test_two_pair() {
+        let hand = [card(Jack, Spade), card(Jack, Heart), card(Nine, Diamond), card(Nine, Club), card(Ten, Spade)];
+        assert_eq!(evaluate_5_card_hand(&hand), HandRank::TwoPair(Jack, Nine, Ten));
+    }
+
+    #[test]
+    fn test_one_pair() {
+        let hand = [card(Ace, Spade), card(Ace, Heart), card(King, Diamond), card(Queen, Club), card(Jack, Spade)];
+        assert_eq!(evaluate_5_card_hand(&hand), HandRank::OnePair(Ace, King, Queen, Jack));
+    }
+
+    #[test]
+    fn test_high_card() {
+        let hand = [card(King, Spade), card(Queen, Heart), card(Jack, Diamond), card(Nine, Club), card(Seven, Spade)];
+        assert_eq!(evaluate_5_card_hand(&hand), HandRank::HighCard(King, Queen, Jack, Nine, Seven));
+    }
+
+    // --- 7选5评估测试 ---
+
+    #[test]
+    fn test_best_hand_from_seven_is_flush() {
+        // 7张牌中可以组成同花，但也有对子，需要正确选择同花
+        let cards = [
+            card(Ace, Heart), card(King, Heart),    // Player's hand
+            card(Ten, Heart), card(Two, Heart), card(Five, Heart), // Board
+            card(Ace, Spade), card(Ten, Club) // Extra cards on board
         ];
+        assert_eq!(find_best_hand(&cards), HandRank::Flush(Ace, King, Ten, Five, Two));
+    }
 
-        // 葫芦
-        let full_house = vec![
-            Card { rank: Jack, suit: Heart },
-            Card { rank: Jack, suit: Diamond },
-            Card { rank: Jack, suit: Club },
-            Card { rank: Two, suit: Spade },
-            Card { rank: Two, suit: Heart },
+    #[test]
+    fn test_best_hand_from_seven_is_full_house() {
+        // 7张牌中有三条和两对，可以组成葫芦
+        let cards = [
+            card(Ten, Spade), card(Ten, Heart),   // Player's hand
+            card(Jack, Club), card(Jack, Diamond), card(Ten, Diamond), // Board
+            card(Two, Club), card(Three, Spade)   // Board
         ];
+        assert_eq!(find_best_hand(&cards), HandRank::FullHouse(Ten, Jack));
+    }
 
-        // 两对
-        let two_pair = vec![
-            Card { rank: King, suit: Heart },
-            Card { rank: King, suit: Diamond },
-            Card { rank: Five, suit: Club },
-            Card { rank: Five, suit: Spade },
-            Card { rank: Four, suit: Heart },
+    #[test]
+    fn test_best_hand_from_seven_plays_the_board() {
+        // 玩家手牌很小，最好的牌是桌面上的顺子
+        let cards = [
+            card(Two, Spade), card(Two, Heart), // Player's hand
+            card(Ten, Club), card(Jack, Diamond), card(Queen, Heart), // Board
+            card(King, Spade), card(Ace, Club) // Board
         ];
+        // 最佳手牌是 A-K-Q-J-T 顺子，玩家的对2没用
+        assert_eq!(find_best_hand(&cards), HandRank::Straight(Ace));
+    }
 
-        let rank1 = evaluate_hand(&royal_flush);
-        let rank2 = evaluate_hand(&full_house);
-        let rank3 = evaluate_hand(&two_pair);
+    #[test]
+    fn test_best_hand_from_six() {
+        let cards = [
+            card(Ace, Spade), card(Ace, Heart), card(King, Spade),
+            card(King, Heart), card(Queen, Spade), card(Jack, Spade)
+        ];
+        // 最佳牌型是 A-A-K-K-Q (两对)
+        assert_eq!(find_best_hand(&cards), HandRank::TwoPair(Ace, King, Queen));
+    }
 
-        println!("手牌 1: [{}]", royal_flush.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(" "));
-        println!("牌型: {:?}", rank1);
-        println!();
+    // --- 牌力比较测试 ---
+    #[test]
+    fn test_rank_comparison() {
+        let full_house_kings = HandRank::FullHouse(King, Two);
+        let full_house_queens = HandRank::FullHouse(Queen, Ace);
+        let flush_king_high = HandRank::Flush(King, Jack, Ten, Five, Two);
+        let flush_queen_high = HandRank::Flush(Queen, Jack, Ten, Five, Two);
 
-        println!("手牌 2: [{}]", full_house.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(" "));
-        println!("牌型: {:?}", rank2);
-        println!();
-
-        println!("手牌 3: [{}]", two_pair.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(" "));
-        println!("牌型: {:?}", rank3);
-        println!();
-
-
-        // 比较牌型大小
-        println!("皇家同花顺 > 葫芦? {}", rank1 > rank2);
-        assert!(rank1 > rank2);
-        println!("葫芦 > 两对? {}", rank2 > rank3);
-        assert!(rank2 > rank3);
-        println!("皇家同花顺 > 两对? {}", rank1 > rank3);
-        assert!(rank1 > rank3);
-
-        // 比较相同牌型但不同大小的情况
-        let pair_of_kings = evaluate_hand(&[
-            Card { rank: King, suit: Spade }, Card { rank: King, suit: Heart },
-            Card { rank: Ten, suit: Spade }, Card { rank: Four, suit: Spade }, Card { rank: Two, suit: Spade },
-        ]);
-        let pair_of_queens = evaluate_hand(&[
-            Card { rank: Queen, suit: Spade }, Card { rank: Queen, suit: Heart },
-            Card { rank: Ten, suit: Spade }, Card { rank: Four, suit: Spade }, Card { rank: Two, suit: Spade },
-        ]);
-
-        println!("\nK对 vs Q对: K对 > Q对? {}", pair_of_kings > pair_of_queens);
-        assert!(pair_of_kings > pair_of_queens);
+        assert!(HandRank::RoyalFlush > HandRank::StraightFlush(King));
+        assert!(HandRank::StraightFlush(King) > HandRank::FourOfAKind(Ace, King));
+        assert!(full_house_kings > full_house_queens); // K葫芦 > Q葫芦
+        assert!(flush_king_high > flush_queen_high); // K同花 > Q同花
     }
 }
