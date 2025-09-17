@@ -40,11 +40,17 @@ pub struct Card {
     suit: Suit,
 }
 
+impl Card {
+    pub fn new(rank: Rank, suit: Suit) -> Card {
+        Card { rank, suit }
+    }
+}
+
 /// 牌型等级 (HandRank)
 /// 这个枚举的设计是核心所在。
 /// 1. 变体的顺序从大到小排列，可以直接利用 `Ord` 进行比较。
 /// 2. 变体内部存储了比较所需的所有信息（例如对子的大小、三条的大小、踢脚牌等）。
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
 pub enum HandRank {
     HighCard(Rank, Rank, Rank, Rank, Rank),          // 高牌
     OnePair(Rank, Rank, Rank, Rank),                 // 一对
