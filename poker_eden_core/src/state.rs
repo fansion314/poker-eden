@@ -16,7 +16,7 @@ pub struct GameState {
     pub hand_player_order: Vec<PlayerId>,
     // 方便通过PlayerId快速查找其在hand_player_order中的索引
     #[serde(skip)]
-    pub player_indices: HashMap<PlayerId, usize>,
+    pub(crate) player_indices: HashMap<PlayerId, usize>,
 
     pub phase: GamePhase,
     pub pot: u32,  // 总奖池金额
@@ -25,7 +25,7 @@ pub struct GameState {
     pub community_cards: Vec<Option<Card>>,
     // 服务端持有的完整牌堆，不会发给客户端。
     #[serde(skip)] // 确保deck不会被序列化发给客户端
-    pub deck: Vec<Card>,
+    pub(crate) deck: Vec<Card>,
 
     // 服务端存有所有玩家的真实底牌 (Some(c1), Some(c2))
     // 客户端只知道自己的真实底牌，其他玩家的底牌为 (None, None)
@@ -33,8 +33,11 @@ pub struct GameState {
     pub player_cards: Vec<(Option<Card>, Option<Card>)>,
     // 当前轮下注额，其索引对应 hand_player_order 中的索引
     pub cur_bets: Vec<u32>,
+    // 在每轮下注开始时重置为 all false
+    // 当玩家加注时，其他人的此状态会被重置为 false
+    pub(crate) player_has_acted: Vec<bool>,
 
-    pub cur_player_idx: Option<usize>,  // 当前应该行动的玩家在 player_order 中的索引
+    pub cur_player_idx: Option<usize>,  // 当前应该行动的玩家在 hand_player_order 中的索引
     pub cur_max_bet: u32, // 当前轮下注的最高金额
     pub small_blind: u32, // 小盲注金额
     pub big_blind: u32, // 大盲注金额
@@ -58,8 +61,7 @@ pub enum GamePhase {
     Flop,
     Turn,
     River,
-    Showdown,
-    HandOver, // 一局结束，结算完成
+    Showdown, // 一局结束，结算完成
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,6 +92,29 @@ pub enum PlayerState {
 
 // --- GameState 的实现方法 ---
 
+impl Default for GameState {
+    fn default() -> Self {
+        Self {
+            room_id: RoomId::new_v4(),
+            players: HashMap::new(),
+            seated_players: VecDeque::new(),
+            hand_player_order: vec![],
+            player_indices: HashMap::new(),
+            phase: GamePhase::WaitingForPlayers,
+            pot: 0,
+            community_cards: vec![],
+            deck: vec![],
+            player_cards: vec![],
+            cur_bets: vec![],
+            player_has_acted: vec![],
+            cur_player_idx: None,
+            cur_max_bet: 0,
+            small_blind: 100,
+            big_blind: 200,
+        }
+    }
+}
+
 impl GameState {
     /// 获取当前行动的玩家ID (如果存在)
     pub fn current_player_id(&self) -> Option<PlayerId> {
@@ -114,7 +139,7 @@ impl GameState {
         // 获取当前客户端在牌局中的索引
         let client_idx_opt = self.player_indices.get(client_id).copied();
 
-        if self.phase == GamePhase::Showdown || self.phase == GamePhase::HandOver {
+        if self.phase == GamePhase::Showdown {
             let players_in_hand_set: std::collections::HashSet<_> = self.get_players_in_hand().into_iter().collect();
 
             for (i, cards) in client_state.player_cards.iter_mut().enumerate() {
