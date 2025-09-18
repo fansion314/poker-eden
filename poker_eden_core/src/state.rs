@@ -53,6 +53,9 @@ pub struct Player {
     pub wins: u32,  // 本次游戏赢的次数
     pub losses: u32,  // 本次游戏输光全部筹码的次数
     pub state: PlayerState,
+    /// 表示玩家是否离线或主动离开。
+    /// true 表示离线，在当前牌局中会自动操作(check/fold)，下一局开始时会自动进入SittingOut。
+    pub is_offline: bool,
     pub seat_id: Option<u8>,  // 座位号（总共若干座位）由用户自己选择座位
 }
 
@@ -76,19 +79,17 @@ pub enum PlayerAction {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum PlayerState {
-    /// 在观众席 (Spectating)
-    Spectating,
-    /// 等待中 (Waiting)
+    /// 等待新牌局 (WaitingForHand): 已入座，等待下一局开始后发牌。
     WaitingForHand,
     /// 轮到其行动 (Acting)
     Acting,
-    /// 等待他人 (WaitingForTurn)
+    /// 等待他人行动 (WaitingForTurn)
     WaitingForTurn,
     /// 已全下 (All-In)
     AllIn,
     /// 已弃牌 (Folded)
     Folded,
-    /// 离席 (Sitting Out)
+    /// 离席 (Sitting Out): 离席，不参与游戏，但是可以观看游戏进行。
     SittingOut,
 }
 

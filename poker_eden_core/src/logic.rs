@@ -19,6 +19,15 @@ impl GameState {
         // 外部调用者负责旋转庄家按钮
         // state.seated_players.rotate_left(1);
 
+        // 0. 在新一局开始前，将所有离线玩家的状态变更为离席
+        for player_id in self.seated_players.iter() {
+            if let Some(player) = self.players.get_mut(player_id) {
+                if player.is_offline {
+                    player.state = PlayerState::SittingOut;
+                }
+            }
+        }
+
         // 1. 验证游戏开始的条件 (从轮换后的新顺序中过滤)
         self.hand_player_order = self
             .seated_players
@@ -46,7 +55,7 @@ impl GameState {
         self.cur_bets = vec![0; active_player_count];
         // 初始化 player_has_acted 状态，所有人都未行动
         self.player_has_acted = vec![false; active_player_count];
-        // 新增: 初始化最小加注额为大盲注
+        // 初始化最小加注额为大盲注
         self.last_raise_amount = self.big_blind;
 
         // 3. 创建和洗牌
@@ -113,6 +122,43 @@ impl GameState {
         let first_actor_id = self.hand_player_order[first_to_act_idx];
         if let Some(player) = self.players.get_mut(&first_actor_id) {
             player.state = PlayerState::Acting;
+        }
+    }
+
+    /// 处理自动玩家（如离线玩家）的行动。
+    ///
+    /// 服务器可以在一个循环中调用此函数，直到它返回 false。
+    /// 当轮到一个需要人类输入的玩家时，它会返回 false。
+    ///
+    /// # Returns
+    /// - `true`: 如果一个自动行动被执行了，意味着游戏状态已推进，可能需要再次调用 tick。
+    /// - `false`: 如果当前轮到人类玩家行动，或者游戏已结束/等待，无需再自动 tick。
+    pub fn tick(&mut self) -> bool {
+        // 游戏结束、等待或没有轮到任何人行动
+        if self.phase == GamePhase::Showdown || self.cur_player_idx.is_none() {
+            return false;
+        }
+
+        let player_id = self.current_player_id().unwrap();
+
+        let is_offline = self.players.get(&player_id).map_or(false, |p| p.is_offline);
+
+        if is_offline {
+            let player_idx = *self.player_indices.get(&player_id).unwrap();
+            let player_total_bet = self.cur_bets[player_idx];
+            let amount_to_call = self.cur_max_bet - player_total_bet;
+
+            // 离线玩家的逻辑：能过牌就过牌，否则就弃牌
+            let action = if amount_to_call == 0 {
+                PlayerAction::Check
+            } else {
+                PlayerAction::Fold
+            };
+
+            self.handle_player_action(player_id, action);
+            true // 执行了自动操作
+        } else {
+            false // 轮到人类玩家
         }
     }
 
@@ -246,12 +292,12 @@ impl GameState {
         }
 
         // 循环查找下一个可以行动的玩家
-        loop {
+        for _ in 0..self.hand_player_order.len() {
             current_idx = (current_idx + 1) % self.hand_player_order.len();
             let next_player_id = self.hand_player_order[current_idx];
             if let Some(player) = self.players.get(&next_player_id) {
                 // 只有处于 WaitingForTurn 或 Acting (例如，重新轮到大盲)的玩家才能行动
-                if matches!(player.state, PlayerState::WaitingForTurn | PlayerState::Acting) {
+                if matches!(player.state, PlayerState::WaitingForTurn) {
                     if !self.player_has_acted[current_idx] {
                         self.cur_player_idx = Some(current_idx);
                         self.players.get_mut(&next_player_id).unwrap().state = PlayerState::Acting;
@@ -299,6 +345,7 @@ impl GameState {
     /// - 确定下一轮第一个行动的玩家 (通常是庄家左边的第一个未弃牌玩家)。
     /// - 如果已是 River 结束，则进入 Showdown (摊牌)阶段。
     fn advance_to_next_phase(&mut self) {
+        self.players.get_mut(&self.hand_player_order[self.cur_player_idx.unwrap()]).unwrap().state = PlayerState::WaitingForTurn;
         self.cur_player_idx = None;
         // 为新一轮下注重置所有玩家的行动状态
         self.player_has_acted.fill(false);
@@ -567,6 +614,7 @@ mod tests {
                 wins: 0,
                 losses: 0,
                 state: PlayerState::WaitingForHand,
+                is_offline: false,
                 seat_id: Some(players.len() as u8),
             };
             players.insert(player_id, player);
