@@ -39,6 +39,8 @@ pub struct GameState {
 
     pub cur_player_idx: Option<usize>,  // 当前应该行动的玩家在 hand_player_order 中的索引
     pub cur_max_bet: u32, // 当前轮下注的最高金额
+    pub last_raise_amount: u32,  // 最小加注额
+
     pub small_blind: u32, // 小盲注金额
     pub big_blind: u32, // 大盲注金额
 }
@@ -109,6 +111,7 @@ impl Default for GameState {
             player_has_acted: vec![],
             cur_player_idx: None,
             cur_max_bet: 0,
+            last_raise_amount: 0,
             small_blind: 100,
             big_blind: 200,
         }
