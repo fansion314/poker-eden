@@ -1,0 +1,160 @@
+// state.rs
+use crate::card::Card;
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, VecDeque};
+use uuid::Uuid;
+
+// --- 类型别名 ---
+
+pub type RoomId = Uuid;
+pub type PlayerId = Uuid;
+
+// --- 核心数据结构 ---
+
+/// 描述整个游戏房间在某一时刻的完整状态
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GameState {
+    pub room_id: RoomId,
+    pub players: HashMap<PlayerId, Player>,  // 可以根据player id查找player
+    // 轮换的、包含所有就座玩家的列表。每局开始时轮换。
+    pub seated_players: VecDeque<PlayerId>,
+    // 当前牌局的玩家顺序，不包含观战者
+    pub hand_player_order: Vec<PlayerId>,
+    // 方便通过PlayerId快速查找其在hand_player_order中的索引
+    #[serde(skip)]
+    pub(crate) player_indices: HashMap<PlayerId, usize>,
+
+    pub phase: GamePhase,
+    pub pot: u32,  // 总奖池金额
+    // 对于服务端，此向量在内存中。
+    // 对于客户端，这里长度为5，未翻开的牌是None。
+    pub community_cards: Vec<Option<Card>>,
+    // 服务端持有的完整牌堆，不会发给客户端。
+    #[serde(skip)] // 确保deck不会被序列化发给客户端
+    pub(crate) deck: Vec<Card>,
+
+    // 服务端存有所有玩家的真实底牌 (Some(c1), Some(c2))
+    // 客户端只知道自己的真实底牌，其他玩家的底牌为 (None, None)
+    // 玩家手牌，其索引对应 hand_player_order 中的索引
+    pub player_cards: Vec<(Option<Card>, Option<Card>)>,
+    // 当前轮下注额，其索引对应 hand_player_order 中的索引
+    pub cur_bets: Vec<u32>,
+    // 在每轮下注开始时重置为 all false
+    // 当玩家加注时，其他人的此状态会被重置为 false
+    #[serde(skip)]
+    pub(crate) player_has_acted: Vec<bool>,
+
+    pub cur_player_idx: usize,  // 当前应该行动的玩家在 hand_player_order 中的索引
+    pub cur_max_bet: u32, // 当前轮下注的最高金额
+    pub last_raise_amount: u32,  // 最小加注额
+
+    pub small_blind: u32, // 小盲注金额
+    pub big_blind: u32, // 大盲注金额
+}
+
+/// 描述单个玩家的状态
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Player {
+    pub id: PlayerId,
+    pub nickname: String,
+    pub stack: u32,  // 剩余筹码
+    pub wins: u32,  // 本次游戏赢的次数
+    pub losses: u32,  // 本次游戏输光全部筹码的次数
+    pub state: PlayerState,
+    pub seat_id: Option<u8>,  // 座位号（总共若干座位）由用户自己选择座位
+}
+
+/// 描述牌局进行到的阶段
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum GamePhase {
+    WaitingForPlayers, // 等待玩家加入
+    PreFlop,           // 翻牌前下注轮
+    Flop,              // 翻牌圈下注轮
+    Turn,              // 转牌圈下注轮
+    River,             // 河牌圈下注轮
+    Showdown,          // 摊牌结算阶段
+}
+
+/// 描述玩家可以执行的动作
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum PlayerAction {
+    Check,     // 过牌
+    Call,      // 跟注
+    BetOrRaise(u32), // 下注或加注，金额为下注后的总额
+    Fold,      // 弃牌
+}
+
+/// 描述玩家在牌局中的具体状态
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PlayerState {
+    /// 等待新牌局: 已入座，等待下一局开始后发牌。
+    Waiting,
+    /// 游戏中: 正在参与当前牌局。
+    Playing,
+    /// 已全下 (All-In): 投入了所有筹码，不再进行后续下注，但仍在牌局中。
+    AllIn,
+    /// 已弃牌 (Folded): 已放弃当前牌局。
+    Folded,
+    /// 离席 (Sitting Out): 离席，不参与游戏，但是可以观看游戏进行。
+    SittingOut,
+    /// 离线或离开: 玩家已断开连接或离开房间。
+    Offline,
+}
+
+// --- GameState 的实现方法 ---
+
+impl Default for GameState {
+    /// 创建一个默认的、初始化的 GameState
+    fn default() -> Self;
+}
+
+impl GameState {
+    /// 获取当前行动的玩家ID (如果存在)
+    ///
+    /// # 实现思路
+    /// 使用 `cur_player_idx` 作为索引，直接从当前牌局的行动顺序列表 `hand_player_order`
+    /// 中获取玩家的ID。如果索引有效，则返回对应的ID；如果索引越界（例如牌局结束时），
+    /// 则返回 `None`。
+    ///
+    /// # 输入
+    /// - `&self`: 对当前游戏状态的不可变引用。
+    ///
+    /// # 输出
+    /// `Option<PlayerId>`: 如果轮到某个玩家行动，则返回其 `PlayerId`，否则返回 `None`。
+    pub fn current_player_id(&self) -> Option<PlayerId>;
+
+    /// 获取所有仍在当前牌局中的玩家ID（未弃牌）
+    ///
+    /// # 实现思路
+    /// 遍历 `hand_player_order` 列表，对于列表中的每个 `PlayerId`，
+    /// 检查其在 `players` 哈希表中的状态。如果玩家状态是 `Playing` 或 `AllIn`，
+    /// 就将其ID收集到一个新的 `Vec<PlayerId>` 中并返回。
+    ///
+    /// # 输入
+    /// - `&self`: 对当前游戏状态的不可变引用。
+    ///
+    /// # 输出
+    /// `Vec<PlayerId>`: 一个包含所有仍在局中（未弃牌）的玩家ID的向量。
+    pub fn get_players_in_hand(&self) -> Vec<PlayerId>;
+
+    /// 为特定客户端生成一个经过处理的、安全的 GameState 副本
+    ///
+    /// # 实现思路
+    /// 这个函数用于防止信息泄露（例如其他玩家的底牌和牌堆）。
+    /// 1. 克隆当前完整的 `GameState`。
+    /// 2. 清空新状态中的 `deck` 牌堆信息，确保客户端永远不会收到它。
+    /// 3. 核心逻辑是处理 `player_cards`（玩家底牌）：
+    ///    - **非摊牌阶段**: 遍历所有玩家的底牌，只保留 `client_id` 对应玩家的底牌，
+    ///      将所有其他玩家的底牌设置为 `(None, None)`。
+    ///    - **摊牌阶段 (Showdown)**: 遍历所有玩家的底牌，除了保留 `client_id` 自己的底牌外，
+    ///      还会显示所有**未弃牌**玩家的底牌。而已弃牌玩家的底牌仍然会设置为 `(None, None)`。
+    /// 4. 返回这个经过“净化”处理后的 `GameState` 副本。
+    ///
+    /// # 输入
+    /// - `&self`: 对当前游戏状态的不可变引用。
+    /// - `client_id: &PlayerId`: 需要接收此状态的客户端的玩家ID。
+    ///
+    /// # 输出
+    /// `Self`: 一个新的 `GameState` 实例，其中隐藏了对指定客户端不应可见的敏感信息。
+    pub fn for_client(&self, client_id: &PlayerId) -> Self;
+}

@@ -439,37 +439,43 @@ impl GameState {
         // 重置最小加注额为大盲注，用于下一轮下注
         self.last_raise_amount = self.big_blind;
 
+        fn preflop_to_flop(state: &mut GameState, messages: &mut Vec<ServerMessage>) {
+            state.phase = GamePhase::Flop;
+            let c1 = state.deck.pop().unwrap();
+            let c2 = state.deck.pop().unwrap();
+            let c3 = state.deck.pop().unwrap();
+            state.community_cards[0..3].copy_from_slice(&[Some(c1), Some(c2), Some(c3)]);
+            messages.push(ServerMessage::CommunityCardsDealt {
+                phase: state.phase,
+                cards: vec![c1, c2, c3],
+            });
+        }
+
+        fn flop_to_turn(state: &mut GameState, messages: &mut Vec<ServerMessage>) {
+            state.phase = GamePhase::Turn;
+            let c = state.deck.pop().unwrap();
+            state.community_cards[3] = Some(c);
+            messages.push(ServerMessage::CommunityCardsDealt {
+                phase: state.phase,
+                cards: vec![c],
+            });
+        }
+
+        fn turn_to_river(state: &mut GameState, messages: &mut Vec<ServerMessage>) {
+            state.phase = GamePhase::River;
+            let c = state.deck.pop().unwrap();
+            state.community_cards[4] = Some(c);
+            messages.push(ServerMessage::CommunityCardsDealt {
+                phase: state.phase,
+                cards: vec![c],
+            });
+        }
+
         // 根据当前阶段推进
         match self.phase {
-            GamePhase::PreFlop => {
-                self.phase = GamePhase::Flop;
-                let c1 = self.deck.pop().unwrap();
-                let c2 = self.deck.pop().unwrap();
-                let c3 = self.deck.pop().unwrap();
-                self.community_cards[0..3].copy_from_slice(&[Some(c1), Some(c2), Some(c3)]);
-                messages.push(ServerMessage::CommunityCardsDealt {
-                    phase: self.phase,
-                    cards: vec![c1, c2, c3],
-                });
-            }
-            GamePhase::Flop => {
-                self.phase = GamePhase::Turn;
-                let c = self.deck.pop().unwrap();
-                self.community_cards[3] = Some(c);
-                messages.push(ServerMessage::CommunityCardsDealt {
-                    phase: self.phase,
-                    cards: vec![c],
-                });
-            }
-            GamePhase::Turn => {
-                self.phase = GamePhase::River;
-                let c = self.deck.pop().unwrap();
-                self.community_cards[4] = Some(c);
-                messages.push(ServerMessage::CommunityCardsDealt {
-                    phase: self.phase,
-                    cards: vec![c],
-                });
-            }
+            GamePhase::PreFlop => preflop_to_flop(self, &mut messages),
+            GamePhase::Flop => flop_to_turn(self, &mut messages),
+            GamePhase::Turn => turn_to_river(self, &mut messages),
             GamePhase::River => {
                 self.phase = GamePhase::Showdown;
                 messages.extend(self.handle_showdown());
@@ -493,35 +499,9 @@ impl GameState {
         if potential_actors.len() < 2 {
             loop {
                 match self.phase {
-                    GamePhase::PreFlop => {
-                        self.phase = GamePhase::Flop;
-                        let c1 = self.deck.pop().unwrap();
-                        let c2 = self.deck.pop().unwrap();
-                        let c3 = self.deck.pop().unwrap();
-                        self.community_cards[0..3].copy_from_slice(&[Some(c1), Some(c2), Some(c3)]);
-                        messages.push(ServerMessage::CommunityCardsDealt {
-                            phase: self.phase,
-                            cards: vec![c1, c2, c3],
-                        });
-                    }
-                    GamePhase::Flop => {
-                        self.phase = GamePhase::Turn;
-                        let c = self.deck.pop().unwrap();
-                        self.community_cards[3] = Some(c);
-                        messages.push(ServerMessage::CommunityCardsDealt {
-                            phase: self.phase,
-                            cards: vec![c],
-                        });
-                    }
-                    GamePhase::Turn => {
-                        self.phase = GamePhase::River;
-                        let c = self.deck.pop().unwrap();
-                        self.community_cards[4] = Some(c);
-                        messages.push(ServerMessage::CommunityCardsDealt {
-                            phase: self.phase,
-                            cards: vec![c],
-                        });
-                    }
+                    GamePhase::PreFlop => preflop_to_flop(self, &mut messages),
+                    GamePhase::Flop => flop_to_turn(self, &mut messages),
+                    GamePhase::Turn => turn_to_river(self, &mut messages),
                     _ => break,
                 }
             }

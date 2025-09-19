@@ -1,0 +1,164 @@
+// card.rs
+use rand::prelude::SliceRandom;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::fmt;
+
+// --- 核心数据结构定义 ---
+
+/// 花色 (Suit)
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy, Serialize, Deserialize)]
+pub enum Suit {
+    Spade,   // 黑桃 ♠
+    Heart,   // 红心 ♥
+    Club,    // 梅花 ♣
+    Diamond, // 方块 ♦
+}
+
+/// 点数 (Rank)
+/// Ace 可以是最大也可以是最小 (在 A-2-3-4-5 顺子中)
+/// Ord 的派生让 Ace 默认是最大的
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy, Serialize, Deserialize)]
+pub enum Rank {
+    Two,
+    Three,
+    Four,
+    Five,
+    Six,
+    Seven,
+    Eight,
+    Nine,
+    Ten,
+    Jack,
+    Queen,
+    King,
+    Ace,
+}
+
+/// 单张扑克牌 (Card)
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy, Serialize, Deserialize)]
+pub struct Card {
+    rank: Rank,
+    suit: Suit,
+}
+
+impl Card {
+    /// 创建一张新牌
+    pub fn new(rank: Rank, suit: Suit) -> Card;
+}
+
+/// 牌型等级 (HandRank)
+/// 这个枚举的设计是核心所在。
+/// 1. 变体的顺序从大到小排列，可以直接利用 `Ord` 进行比较。
+/// 2. 变体内部存储了比较所需的所有信息（例如对子的大小、三条的大小、踢脚牌等）。
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Serialize, Deserialize)]
+pub enum HandRank {
+    HighCard(Rank, Rank, Rank, Rank, Rank),          // 高牌
+    OnePair(Rank, Rank, Rank, Rank),                 // 一对
+    TwoPair(Rank, Rank, Rank),                       // 两对
+    ThreeOfAKind(Rank, Rank, Rank),                  // 三条
+    Straight(Rank),                                  // 顺子 (最高牌的点数)
+    Flush(Rank, Rank, Rank, Rank, Rank),             // 同花
+    FullHouse(Rank, Rank),                           // 葫芦 (三条的点数, 对子的点数)
+    FourOfAKind(Rank, Rank),                         // 四条 (四条的点数, 踢脚牌)
+    StraightFlush(Rank),                             // 同花顺 (最高牌的点数)
+    RoyalFlush,                                      // 皇家同花顺
+}
+
+
+// --- 随机牌组生成 ---
+
+/// 创建一副完整的 52 张扑克牌
+///
+/// # 实现思路
+/// 该函数内部定义了所有的花色和点数。通过两层循环，遍历所有花色和点数的组合，
+/// 每一次组合都创建一张新的 `Card` 并将其放入一个预先分配好容量的 `Vec` 中，
+/// 最终返回这个包含52张牌的完整牌组。
+///
+/// # 输入
+/// 无
+///
+/// # 输出
+/// `Vec<Card>`: 一个包含52张标准扑克牌的向量。
+fn create_deck() -> Vec<Card>;
+
+/// 从一副新牌中随机生成并返回 k 张牌
+///
+/// # 实现思路
+/// 1. 调用 `create_deck()` 函数生成一副全新的、有序的52张扑克牌。
+/// 2. 初始化一个随机数生成器 (RNG)。
+/// 3. 使用 `shuffle` 方法对整副牌进行原地随机洗牌。
+/// 4. 从洗好的牌组中取出前 `k` 张牌，并收集到一个新的 `Vec<Card>` 中返回。
+///
+/// # 输入
+/// - `k: usize`: 需要生成的随机手牌的数量。
+///
+/// # 输出
+/// `Vec<Card>`: 一个包含 `k` 张不重复的随机扑克牌的向量。
+pub fn generate_random_hand(k: usize) -> Vec<Card>;
+
+
+// --- 牌型评估逻辑 ---
+
+/// 从 5 到 7 张牌中找出最优的 5 张牌组合牌力
+/// 这是德州扑克规则的核心评估函数
+///
+/// # Panics
+/// 如果牌数少于 5 或多于 7，则会 panic。
+///
+/// # 实现思路
+/// 1. 首先检查输入牌数是否在 5 到 7 张的有效范围内。
+/// 2. 如果恰好是 5 张牌，直接调用 `evaluate_5_card_hand` 进行评估。
+/// 3. 如果是 6 或 7 张牌，则通过调用 `get_combinations` 辅助函数，生成所有可能的 5 张牌的组合。
+/// 4. 遍历每一个 5 张牌的组合，分别调用 `evaluate_5_card_hand` 来评估其牌力等级 (`HandRank`)。
+/// 5. 利用 `HandRank` 枚举派生的 `Ord` 特性，在所有组合的评估结果中找到并返回最大的那一个。
+///    这种穷举法确保了结果的绝对正确性。
+///
+/// # 输入
+/// - `all_cards: &[Card]`: 一个包含 5、6 或 7 张牌的切片。
+///
+/// # 输出
+/// `HandRank`: 从输入牌中能组成的最佳5张牌的牌型等级。
+pub fn find_best_hand(all_cards: &[Card]) -> HandRank;
+
+/// 评估一手 5 张牌的牌型 (原 evaluate_hand 函数)
+///
+/// # 实现思路
+/// 这是一个复杂的逻辑判断过程：
+/// 1. 首先将 5 张手牌按点数从大到小排序。
+/// 2. **检查同花 (Flush)**：判断所有牌的花色是否相同。
+/// 3. **检查顺子 (Straight)**：判断所有牌的点数是否连续。这里需要特殊处理 A-2-3-4-5 的情况。
+/// 4. **组合判断**：
+///    - 如果既是同花又是顺子，则根据顺子的最大牌是否为 Ace 来判断是皇家同花顺还是同花顺。
+/// 5. **统计点数频率**：如果不是同花顺，则使用 HashMap 统计每个点数出现的次数。
+/// 6. **根据频率判断**：将统计结果（出现次数、点数）排序，根据最常见点数的出现次数来判断：
+///    - 4 次: 四条 (Four of a Kind)
+///    - 3 次: 葫芦 (Full House) 或三条 (Three of a Kind)
+///    - 2 次: 两对 (Two Pair) 或一对 (One Pair)
+/// 7. **最后判断**：如果以上都不是，则根据步骤2和3的结果判断是普通同花、普通顺子，还是高牌 (High Card)。
+///
+/// # 输入
+/// - `hand: &[Card]`: 一个包含**正好** 5 张牌的切片。
+///
+/// # 输出
+/// `HandRank`: 该 5 张牌对应的确切牌型等级。
+fn evaluate_5_card_hand(hand: &[Card]) -> HandRank;
+
+
+/// 辅助函数：从一个切片中生成所有大小为 k 的组合
+///
+/// # 实现思路
+/// 这是一个泛型递归函数，用于找出所有组合：
+/// - **基准情况 (Base Case)**: 如果 `k` 为 0，返回一个包含空向量的向量 `[[]]`。如果数据长度小于 `k`，无法组合，返回空向量 `[]`。
+/// - **递归步骤**: 将问题分解为两部分：
+///   1. **包含第一个元素 `first` 的组合**：从剩余的 `rest` 切片中递归查找 `k-1` 个元素的组合，然后将 `first` 添加到每个组合的前面。
+///   2. **不包含第一个元素的组合**：从剩余的 `rest` 切片中递归查找 `k` 个元素的组合。
+/// - 将这两部分的结果合并，即为最终所有可能的组合。
+///
+/// # 输入
+/// - `data: &[T]`: 任意类型的元素切片，类型 `T` 需要实现 `Clone`。
+/// - `k: usize`: 每个组合的大小。
+///
+/// # 输出
+/// `Vec<Vec<T>>`: 一个包含所有可能组合的向量，每个组合本身也是一个向量。
+fn get_combinations<T: Clone>(data: &[T], k: usize) -> Vec<Vec<T>>;
