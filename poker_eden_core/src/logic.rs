@@ -21,9 +21,9 @@ impl GameState {
 
         // 0. 在新一局开始前，将所有离线玩家的状态变更为离席
         for player_id in self.seated_players.iter() {
-            if let Some(player) = self.players.get_mut(player_id) {
-                if player.is_offline {
-                    player.state = PlayerState::SittingOut;
+            if let Some(p) = self.players.get_mut(player_id) {
+                if p.state == PlayerState::Offline || p.stack == 0 {
+                    p.state = PlayerState::SittingOut;
                 }
             }
         }
@@ -65,7 +65,7 @@ impl GameState {
         // 4. 发底牌并设置玩家状态
         for (idx, player_id) in self.hand_player_order.iter().enumerate() {
             if let Some(player) = self.players.get_mut(player_id) {
-                player.state = PlayerState::WaitingForTurn;
+                player.state = PlayerState::Playing;
                 let card1 = self.deck.pop().unwrap();
                 let card2 = self.deck.pop().unwrap();
                 self.player_cards[idx] = (Some(card1), Some(card2));
@@ -117,12 +117,7 @@ impl GameState {
 
         // 6. 设置游戏阶段和第一个行动者
         self.phase = GamePhase::PreFlop;
-        self.cur_player_idx = Some(first_to_act_idx);
-
-        let first_actor_id = self.hand_player_order[first_to_act_idx];
-        if let Some(player) = self.players.get_mut(&first_actor_id) {
-            player.state = PlayerState::Acting;
-        }
+        self.cur_player_idx = first_to_act_idx;
     }
 
     /// 处理自动玩家（如离线玩家）的行动。
@@ -135,13 +130,13 @@ impl GameState {
     /// - `false`: 如果当前轮到人类玩家行动，或者游戏已结束/等待，无需再自动 tick。
     pub fn tick(&mut self) -> bool {
         // 游戏结束、等待或没有轮到任何人行动
-        if self.phase == GamePhase::Showdown || self.cur_player_idx.is_none() {
+        if self.phase == GamePhase::Showdown {
             return false;
         }
 
         let player_id = self.current_player_id().unwrap();
 
-        let is_offline = self.players.get(&player_id).map_or(false, |p| p.is_offline);
+        let is_offline = self.players.get(&player_id).map_or(false, |p| p.state == PlayerState::Offline);
 
         if is_offline {
             let player_idx = *self.player_indices.get(&player_id).unwrap();
@@ -265,7 +260,6 @@ impl GameState {
             // 如果是，直接分配底池，结束这局
             self.phase = GamePhase::Showdown;
             self.distribute_pot_to_single_winner_group(players_in_hand);
-            self.cur_player_idx = None;
             return;
         }
 
@@ -280,29 +274,16 @@ impl GameState {
 
     /// 将行动权转移给下一位合法的玩家
     fn advance_to_next_player(&mut self) {
-        let mut current_idx = match self.cur_player_idx {
-            Some(idx) => idx,
-            None => return,
-        };
-
-        if let Some(player) = self.players.get_mut(&self.hand_player_order[current_idx]) {
-            if player.state == PlayerState::Acting {
-                player.state = PlayerState::WaitingForTurn;
-            }
-        }
+        let mut current_idx = self.cur_player_idx;
 
         // 循环查找下一个可以行动的玩家
         for _ in 0..self.hand_player_order.len() {
             current_idx = (current_idx + 1) % self.hand_player_order.len();
             let next_player_id = self.hand_player_order[current_idx];
             if let Some(player) = self.players.get(&next_player_id) {
-                // 只有处于 WaitingForTurn 或 Acting (例如，重新轮到大盲)的玩家才能行动
-                if matches!(player.state, PlayerState::WaitingForTurn) {
-                    if !self.player_has_acted[current_idx] {
-                        self.cur_player_idx = Some(current_idx);
-                        self.players.get_mut(&next_player_id).unwrap().state = PlayerState::Acting;
-                        return;
-                    }
+                if player.state == PlayerState::Playing && !self.player_has_acted[current_idx] {
+                    self.cur_player_idx = current_idx;
+                    return;
                 }
             }
         }
@@ -345,8 +326,6 @@ impl GameState {
     /// - 确定下一轮第一个行动的玩家 (通常是庄家左边的第一个未弃牌玩家)。
     /// - 如果已是 River 结束，则进入 Showdown (摊牌)阶段。
     fn advance_to_next_phase(&mut self) {
-        self.players.get_mut(&self.hand_player_order[self.cur_player_idx.unwrap()]).unwrap().state = PlayerState::WaitingForTurn;
-        self.cur_player_idx = None;
         // 为新一轮下注重置所有玩家的行动状态
         self.player_has_acted.fill(false);
         // 重置最小加注额为大盲注，用于下一轮下注
@@ -400,10 +379,7 @@ impl GameState {
             self.handle_showdown();
         } else {
             // 否则，正常开始下一轮，设置第一个可以行动的玩家
-            let first_actor_idx = potential_actors[0];
-            self.cur_player_idx = Some(first_actor_idx);
-            let player_id = self.hand_player_order[first_actor_idx];
-            self.players.get_mut(&player_id).unwrap().state = PlayerState::Acting;
+            self.cur_player_idx = potential_actors[0];
         }
     }
 
@@ -412,7 +388,6 @@ impl GameState {
     /// - 找出所有未弃牌的玩家。
     /// - 调用新的分池函数来处理奖金分配
     fn handle_showdown(&mut self) {
-        self.cur_player_idx = None;
         self.return_uncalled_bets();
         self.distribute_pots();
     }
@@ -613,8 +588,7 @@ mod tests {
                 stack,
                 wins: 0,
                 losses: 0,
-                state: PlayerState::WaitingForHand,
-                is_offline: false,
+                state: PlayerState::Waiting,
                 seat_id: Some(players.len() as u8),
             };
             players.insert(player_id, player);
@@ -651,10 +625,10 @@ mod tests {
         assert_eq!(state.cur_max_bet, 20);
 
         // 验证第一个行动者 (大盲注之后)
-        let first_actor_idx = state.cur_player_idx.unwrap();
+        let first_actor_idx = state.cur_player_idx;
         assert_eq!(first_actor_idx, 3);
         let first_actor_id = state.hand_player_order[first_actor_idx];
-        assert_eq!(state.players.get(&first_actor_id).unwrap().state, PlayerState::Acting);
+        assert_eq!(state.players.get(&first_actor_id).unwrap().state, PlayerState::Playing);
     }
 
     #[test]
@@ -668,7 +642,7 @@ mod tests {
 
         // p0行动 (第一个行动者是p0)
         // Note: 3人局，BB(p2)之后是Dealer(p0)行动
-        state.cur_player_idx = Some(0);
+        state.cur_player_idx = 0;
         state.handle_player_action(p0_id, PlayerAction::Fold);
         assert_eq!(state.players.get(&p0_id).unwrap().state, PlayerState::Folded);
 
@@ -693,7 +667,7 @@ mod tests {
         let p2_id = state.hand_player_order[2];
 
         // 3人局，行动顺序是 p0 -> p1 -> p2
-        assert_eq!(state.cur_player_idx, Some(0));
+        assert_eq!(state.cur_player_idx, 0);
         state.handle_player_action(p0_id, PlayerAction::Call); // p0跟20
         state.handle_player_action(p1_id, PlayerAction::Call); // p1补10
         state.handle_player_action(p2_id, PlayerAction::Check); // p2过牌
@@ -742,8 +716,8 @@ mod tests {
             Some(Card::new(Rank::Ace, Suit::Diamond)),
         );
 
-        state.players.get_mut(&p0_id).unwrap().state = PlayerState::WaitingForTurn;
-        state.players.get_mut(&p1_id).unwrap().state = PlayerState::WaitingForTurn;
+        state.players.get_mut(&p0_id).unwrap().state = PlayerState::Playing;
+        state.players.get_mut(&p1_id).unwrap().state = PlayerState::Playing;
 
         state.handle_showdown();
 
@@ -773,7 +747,7 @@ mod tests {
         assert_eq!(state.players.get(&bb_id).unwrap().stack, 980);
 
         // 翻牌前，庄家(p0)先行动
-        assert_eq!(state.cur_player_idx, Some(0));
+        assert_eq!(state.cur_player_idx, 0);
         assert_eq!(state.current_player_id(), Some(dealer_id));
 
         // 庄家跟注
@@ -800,7 +774,7 @@ mod tests {
         let p2_id = p_ids[2];
 
         // 行动顺序 p0 -> p1 -> p2
-        state.cur_player_idx = Some(0);
+        state.cur_player_idx = 0;
         state.handle_player_action(p0_id, PlayerAction::Fold);
         state.handle_player_action(p1_id, PlayerAction::Fold);
 
@@ -1012,7 +986,7 @@ mod tests {
         // 设置玩家状态
         state.players.get_mut(&p0_id).unwrap().state = PlayerState::AllIn;
         state.players.get_mut(&p1_id).unwrap().state = PlayerState::AllIn;
-        state.players.get_mut(&p2_id).unwrap().state = PlayerState::WaitingForTurn;
+        state.players.get_mut(&p2_id).unwrap().state = PlayerState::Playing;
 
         // 设置牌力: P0 (最强) > P2 (中等) > P1 (最弱)
         state.community_cards = vec![
@@ -1066,7 +1040,7 @@ mod tests {
         // **FIX**: 同步更新玩家的stack值
         state.players.get_mut(&p0_id).unwrap().stack = 500;
         state.players.get_mut(&p1_id).unwrap().stack = 0;
-        state.players.get_mut(&p0_id).unwrap().state = PlayerState::WaitingForTurn;
+        state.players.get_mut(&p0_id).unwrap().state = PlayerState::Playing;
         state.players.get_mut(&p1_id).unwrap().state = PlayerState::AllIn;
         // P0 牌更好
         state.community_cards = vec![
@@ -1113,8 +1087,8 @@ mod tests {
         state.players.get_mut(&p1_id).unwrap().stack = 0;
         state.players.get_mut(&p2_id).unwrap().stack = 0;
         state.players.get_mut(&p0_id).unwrap().state = PlayerState::AllIn;
-        state.players.get_mut(&p1_id).unwrap().state = PlayerState::WaitingForTurn;
-        state.players.get_mut(&p2_id).unwrap().state = PlayerState::WaitingForTurn;
+        state.players.get_mut(&p1_id).unwrap().state = PlayerState::Playing;
+        state.players.get_mut(&p2_id).unwrap().state = PlayerState::Playing;
 
         // P0 (皇家同花顺) > P1 (同花顺) == P2 (同花顺)
         state.community_cards = vec![
@@ -1169,7 +1143,7 @@ mod tests {
 
         // 因为p2加注了，行动权应该回到p0
         assert_eq!(state.current_player_id(), Some(p0_id));
-        assert_eq!(state.players.get(&p0_id).unwrap().state, PlayerState::Acting);
+        assert_eq!(state.players.get(&p0_id).unwrap().state, PlayerState::Playing);
 
         // p0 弃牌
         state.handle_player_action(p0_id, PlayerAction::Fold);
@@ -1190,14 +1164,46 @@ mod tests {
         let p2_id = p_ids[2];
 
         // 初始时，p1和p2没钱，p0有钱
-        state.players.get_mut(&p0_id).unwrap().state = PlayerState::WaitingForHand;
-        state.players.get_mut(&p1_id).unwrap().state = PlayerState::WaitingForHand;
-        state.players.get_mut(&p2_id).unwrap().state = PlayerState::WaitingForHand;
+        state.players.get_mut(&p0_id).unwrap().state = PlayerState::Playing;
+        state.players.get_mut(&p1_id).unwrap().state = PlayerState::Playing;
+        state.players.get_mut(&p2_id).unwrap().state = PlayerState::Playing;
 
         state.start_new_hand();
 
         // 因为活跃玩家（筹码>0）只有一个，游戏无法开始
         assert_eq!(state.hand_player_order.len(), 1);
         assert_eq!(state.phase, GamePhase::WaitingForPlayers);
+    }
+
+    /// 新增的单元测试：测试tick函数是否能正确处理离线玩家
+    #[test]
+    fn test_tick_for_offline_player_folds_when_facing_a_bet() {
+        let (mut state, p_ids) = setup_test_game(&[1000, 1000, 1000]);
+
+        // 旋转玩家顺序，让 p0 是庄家, p1 是小盲, p2 是大盲
+        // 这样在3人局中，第一个行动的是 p0
+        state.seated_players.rotate_left(0);
+        state.start_new_hand();
+
+        // 确认第一个行动的是p0
+        let p0_id = state.hand_player_order[0];
+        let p1_id = state.hand_player_order[1];
+        assert_eq!(state.current_player_id(), Some(p0_id));
+
+        // 将p0设置为离线
+        state.players.get_mut(&p0_id).unwrap().state = PlayerState::Offline;
+
+        // 调用tick。因为p0需要跟大盲注20，所以他应该自动弃牌。
+        // tick()执行了自动操作，所以返回true
+        assert_eq!(state.tick(), true);
+
+        // 验证p0已弃牌
+        assert_eq!(state.players.get(&p0_id).unwrap().state, PlayerState::Folded);
+
+        // 验证行动权成功转移给了p1
+        assert_eq!(state.current_player_id(), Some(p1_id));
+
+        // 再次调用tick。因为p1是在线的，所以tick()不执行任何操作，返回false
+        assert_eq!(state.tick(), false);
     }
 }

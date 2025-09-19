@@ -37,7 +37,7 @@ pub struct GameState {
     // 当玩家加注时，其他人的此状态会被重置为 false
     pub(crate) player_has_acted: Vec<bool>,
 
-    pub cur_player_idx: Option<usize>,  // 当前应该行动的玩家在 hand_player_order 中的索引
+    pub cur_player_idx: usize,  // 当前应该行动的玩家在 hand_player_order 中的索引
     pub cur_max_bet: u32, // 当前轮下注的最高金额
     pub last_raise_amount: u32,  // 最小加注额
 
@@ -53,9 +53,6 @@ pub struct Player {
     pub wins: u32,  // 本次游戏赢的次数
     pub losses: u32,  // 本次游戏输光全部筹码的次数
     pub state: PlayerState,
-    /// 表示玩家是否离线或主动离开。
-    /// true 表示离线，在当前牌局中会自动操作(check/fold)，下一局开始时会自动进入SittingOut。
-    pub is_offline: bool,
     pub seat_id: Option<u8>,  // 座位号（总共若干座位）由用户自己选择座位
 }
 
@@ -79,18 +76,18 @@ pub enum PlayerAction {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum PlayerState {
-    /// 等待新牌局 (WaitingForHand): 已入座，等待下一局开始后发牌。
-    WaitingForHand,
-    /// 轮到其行动 (Acting)
-    Acting,
-    /// 等待他人行动 (WaitingForTurn)
-    WaitingForTurn,
+    /// 等待新牌局: 已入座，等待下一局开始后发牌。
+    Waiting,
+    /// 游戏中
+    Playing,
     /// 已全下 (All-In)
     AllIn,
     /// 已弃牌 (Folded)
     Folded,
     /// 离席 (Sitting Out): 离席，不参与游戏，但是可以观看游戏进行。
     SittingOut,
+    /// 离线或离开
+    Offline,
 }
 
 // --- GameState 的实现方法 ---
@@ -110,7 +107,7 @@ impl Default for GameState {
             player_cards: vec![],
             cur_bets: vec![],
             player_has_acted: vec![],
-            cur_player_idx: None,
+            cur_player_idx: 0,
             cur_max_bet: 0,
             last_raise_amount: 0,
             small_blind: 100,
@@ -122,7 +119,7 @@ impl Default for GameState {
 impl GameState {
     /// 获取当前行动的玩家ID (如果存在)
     pub fn current_player_id(&self) -> Option<PlayerId> {
-        self.cur_player_idx.map(|idx| self.hand_player_order[idx])
+        self.hand_player_order.get(self.cur_player_idx).copied()
     }
 
     pub fn get_players_in_hand(&self) -> Vec<PlayerId> {
@@ -130,7 +127,7 @@ impl GameState {
             .iter()
             .filter(|id| {
                 let player = self.players.get(id).unwrap();
-                matches!(player.state, PlayerState::Acting | PlayerState::WaitingForTurn | PlayerState::AllIn)
+                matches!(player.state, PlayerState::Playing | PlayerState::AllIn)
             })
             .cloned()
             .collect()
