@@ -1,18 +1,29 @@
 use crate::card::{Card, HandRank};
 use crate::state::{GamePhase, GameState, Player, PlayerAction, PlayerId};
+use crate::RoomId;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+pub type PlayerSecret = Uuid;
 
 // --- 客户端 -> 服务器 的消息 ---
 // 这些是客户端可以发送给服务器的指令或动作。
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum ClientMessage {
+    // --- 房间管理消息 ---
+    /// 客户端请求创建一个新房间
+    CreateRoom { nickname: String },
+    /// 客户端请求加入一个已存在的房间
+    JoinRoom { room_id: RoomId, nickname: String },
+
+    // --- 游戏内消息 ---
     /// 玩家设置自己的昵称
     SetNickname(String),
     /// 玩家选择一个座位坐下
-    SitDown { seat_id: u8 },
+    RequestSeat { seat_id: u8 },
     /// 玩家从座位上站起 (进入观战)
-    StandUp,
+    LeaveSeat,
     /// 玩家请求开始新的一局游戏 (通常由房主或自动触发)
     StartHand,
     /// 玩家在轮到自己时执行的游戏动作
@@ -24,6 +35,15 @@ pub enum ClientMessage {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum ServerMessage {
+    // --- 房间管理消息 ---
+    /// 成功加入或创建房间后，服务器私密地发给该玩家
+    RoomJoined {
+        your_id: PlayerId,
+        your_secret: PlayerSecret, // 用于断线重连的凭证
+        game_state: GameState, // 净化后的初始游戏状态
+    },
+
+    // --- 游戏状态更新消息 ---
     /// 完整游戏状态的快照。
     /// 通常在玩家刚加入房间或需要强制同步状态时发送。
     /// 发送时会调用 state.for_client(client_id) 来隐藏敏感信息。
@@ -61,6 +81,7 @@ pub enum ServerMessage {
     /// 轮到下一个玩家行动
     NextToAct {
         player_id: PlayerId,
+        // valid_actions: Vec<PlayerActionType>, // 新增：告诉客户端哪些动作是合法的
     },
 
     /// 发出公共牌 (翻牌、转牌、河牌)
@@ -82,9 +103,8 @@ pub enum ServerMessage {
     },
 
     /// 服务器向特定客户端发送错误信息
-    Error {
-        message: String,
-    },
+    Info { message: String },
+    Error { message: String },
 }
 
 /// 在 Showdown 消息中，用于描述单个玩家的结果
@@ -97,4 +117,14 @@ pub struct ShowdownResult {
     pub cards: Option<(Card, Card)>,
     /// 该玩家赢得的筹码数量
     pub winnings: u32,
+}
+
+// 用于告知客户端当前合法的动作类型，简化客户端UI逻辑
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum PlayerActionType {
+    Fold,
+    Check,
+    Call(u32), // 跟注需要的金额
+    Bet(u32, u32), // 最小/最大下注额
+    Raise(u32, u32), // 最小/最大加注额
 }

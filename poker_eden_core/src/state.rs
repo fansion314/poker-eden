@@ -13,7 +13,8 @@ pub struct GameState {
     // 轮换的、包含所有就座玩家的列表。每局开始时轮换。
     pub seated_players: VecDeque<PlayerId>,
     // 当前牌局的玩家顺序，不包含观战者
-    pub hand_player_order: Vec<PlayerId>,
+    #[serde(skip)]
+    pub(crate) hand_player_order: Vec<PlayerId>,
     // 方便通过PlayerId快速查找其在hand_player_order中的索引
     #[serde(skip)]
     pub(crate) player_indices: HashMap<PlayerId, usize>,
@@ -31,15 +32,15 @@ pub struct GameState {
     // 客户端只知道自己的真实底牌，其他玩家的底牌为 (None, None)
     // 玩家手牌，其索引对应 hand_player_order 中的索引
     pub player_cards: Vec<(Option<Card>, Option<Card>)>,
-    // 当前轮下注额，其索引对应 hand_player_order 中的索引
-    pub cur_bets: Vec<u32>,
+    // 每个玩家的总下注额，其索引对应 hand_player_order 中的索引
+    pub bets: Vec<u32>,
     // 在每轮下注开始时重置为 all false
     // 当玩家加注时，其他人的此状态会被重置为 false
     #[serde(skip)]
     pub(crate) player_has_acted: Vec<bool>,
 
     pub cur_player_idx: usize,  // 当前应该行动的玩家在 hand_player_order 中的索引
-    pub cur_max_bet: u32, // 当前轮下注的最高金额
+    pub max_bet: u32, // 当前轮下注的最高金额
     pub last_raise_amount: u32,  // 最小加注额
 
     pub small_blind: u32, // 小盲注金额
@@ -106,10 +107,10 @@ impl Default for GameState {
             community_cards: vec![],
             deck: vec![],
             player_cards: vec![],
-            cur_bets: vec![],
+            bets: vec![],
             player_has_acted: vec![],
             cur_player_idx: 0,
-            cur_max_bet: 0,
+            max_bet: 0,
             last_raise_amount: 0,
             small_blind: 100,
             big_blind: 200,

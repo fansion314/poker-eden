@@ -4,3 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+poker_eden_core = { path = "../poker_eden_core" }
+
+tokio = { workspace = true }
+futures-util = { version = "0.3", features = ["sink"] }
+serde_json = { workspace = true }
+tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
+url = "2.5"

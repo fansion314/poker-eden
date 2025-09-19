@@ -4,3 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+poker_eden_core = { path = "../poker_eden_core" }
+
+tokio = { workspace = true }
+axum = { version = "0.8", features = ["ws", "macros"] }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+futures-util = { version = "0.3", features = ["sink"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -69,11 +69,11 @@ impl GameState {
         // 重置状态
         self.pot = 0;
         self.community_cards = vec![None; 5];
-        self.cur_max_bet = 0;
+        self.max_bet = 0;
 
         // 初始化基于Vec的结构
         self.player_cards = vec![(None, None); active_player_count];
-        self.cur_bets = vec![0; active_player_count];
+        self.bets = vec![0; active_player_count];
         // 初始化 player_has_acted 状态，所有人都未行动
         self.player_has_acted = vec![false; active_player_count];
         // 初始化最小加注额为大盲注
@@ -122,7 +122,7 @@ impl GameState {
         let sb_amount = self.small_blind.min(sb_player.stack);
         sb_player.stack -= sb_amount;
         self.pot += sb_amount;
-        self.cur_bets[sb_idx] = sb_amount;
+        self.bets[sb_idx] = sb_amount;
         if sb_player.stack == 0 {
             sb_player.state = PlayerState::AllIn;
         }
@@ -130,7 +130,7 @@ impl GameState {
         messages.push(ServerMessage::PlayerActed {
             player_id: sb_id,
             action: PlayerAction::BetOrRaise(sb_amount),
-            total_bet_this_round: self.cur_bets[sb_idx],
+            total_bet_this_round: self.bets[sb_idx],
             new_stack: self.players.get(&sb_id).unwrap().stack,
             new_pot: self.pot,
         });
@@ -141,7 +141,7 @@ impl GameState {
         let bb_amount = self.big_blind.min(bb_player.stack);
         bb_player.stack -= bb_amount;
         self.pot += bb_amount;
-        self.cur_bets[bb_idx] = bb_amount;
+        self.bets[bb_idx] = bb_amount;
         if bb_player.stack == 0 {
             bb_player.state = PlayerState::AllIn;
         }
@@ -149,12 +149,12 @@ impl GameState {
         messages.push(ServerMessage::PlayerActed {
             player_id: bb_id,
             action: PlayerAction::BetOrRaise(bb_amount),
-            total_bet_this_round: self.cur_bets[bb_idx],
+            total_bet_this_round: self.bets[bb_idx],
             new_stack: self.players.get(&bb_id).unwrap().stack,
             new_pot: self.pot,
         });
 
-        self.cur_max_bet = self.big_blind;
+        self.max_bet = self.big_blind;
 
         // 设置游戏阶段和第一个行动者
         self.phase = GamePhase::PreFlop;
@@ -193,7 +193,7 @@ impl GameState {
 
         if is_auto_action {
             let player_idx = *self.player_indices.get(&player_id).unwrap();
-            let amount_to_call = self.cur_max_bet - self.cur_bets[player_idx];
+            let amount_to_call = self.max_bet - self.bets[player_idx];
             let action = if amount_to_call == 0 {
                 PlayerAction::Check
             } else {
@@ -233,8 +233,8 @@ impl GameState {
         }
 
         let player_idx = *self.player_indices.get(&player_id).unwrap();
-        let player_total_bet = self.cur_bets[player_idx];
-        let amount_to_call = self.cur_max_bet - player_total_bet;
+        let player_total_bet = self.bets[player_idx];
+        let amount_to_call = self.max_bet - player_total_bet;
 
         {
             let player = self.players.get_mut(&player_id).unwrap();
@@ -253,7 +253,7 @@ impl GameState {
                         let call_amount = amount_to_call.min(player.stack);
                         player.stack -= call_amount;
                         self.pot += call_amount;
-                        self.cur_bets[player_idx] += call_amount;
+                        self.bets[player_idx] += call_amount;
                         if player.stack == 0 {
                             player.state = PlayerState::AllIn;
                         }
@@ -270,7 +270,7 @@ impl GameState {
                     let new_total_bet = player_total_bet + raise_amount;
 
                     // 如果是翻牌后的第一轮下注 (Bet)，下注额必须大于等于大盲注 (除非是All-in)
-                    if self.cur_max_bet == 0 {
+                    if self.max_bet == 0 {
                         if raise_amount < self.big_blind && player.stack > raise_amount {
                             return messages;
                         }
@@ -278,12 +278,12 @@ impl GameState {
                     // 如果是加注 (Raise)
                     else {
                         // 新的总下注额必须大于当前最高下注额
-                        if new_total_bet <= self.cur_max_bet {
+                        if new_total_bet <= self.max_bet {
                             return messages;
                         }
 
                         // 验证加注额是否符合最小加注规则
-                        let raise_diff = new_total_bet - self.cur_max_bet;
+                        let raise_diff = new_total_bet - self.max_bet;
                         // 加注的差额必须大于等于上一个加注的差额 (All-in除外)
                         if raise_diff < self.last_raise_amount && player.stack > raise_amount {
                             return messages;
@@ -293,15 +293,15 @@ impl GameState {
                     // 更新状态
                     player.stack -= raise_amount;
                     self.pot += raise_amount;
-                    self.cur_bets[player_idx] = new_total_bet;
+                    self.bets[player_idx] = new_total_bet;
 
                     // 如果产生了新的最高下注，则更新 cur_max_bet 和 last_raise_amount
-                    if new_total_bet > self.cur_max_bet {
+                    if new_total_bet > self.max_bet {
                         // 只有在不是全下的情况下才更新最小加注额, "不足额"的all-in加注不改变最小加注额
                         if player.stack > 0 {
-                            self.last_raise_amount = new_total_bet - self.cur_max_bet;
+                            self.last_raise_amount = new_total_bet - self.max_bet;
                         }
-                        self.cur_max_bet = new_total_bet;
+                        self.max_bet = new_total_bet;
                     }
 
                     if player.stack == 0 {
@@ -327,7 +327,7 @@ impl GameState {
         messages.push(ServerMessage::PlayerActed {
             player_id,
             action, // 将传入的 action 克隆或复制到消息中
-            total_bet_this_round: self.cur_bets[player_idx],
+            total_bet_this_round: self.bets[player_idx],
             new_stack: player.stack,
             new_pot: self.pot,
         });
@@ -411,7 +411,7 @@ impl GameState {
         // 检查这些玩家的下注额是否都等于当前最高下注额
         let all_bets_match = players_to_act
             .iter()
-            .all(|(idx, _)| self.cur_bets[*idx] == self.cur_max_bet);
+            .all(|(idx, _)| self.bets[*idx] == self.max_bet);
 
         if !all_bets_match {
             return false;
@@ -541,7 +541,7 @@ impl GameState {
                 let p = self.players.get(id).unwrap();
                 !matches!(p.state, PlayerState::Folded | PlayerState::SittingOut)
             })
-            .map(|(idx, id)| (idx, id, self.cur_bets[idx]))
+            .map(|(idx, id)| (idx, id, self.bets[idx]))
             .collect();
 
         if players_in_showdown.len() < 2 {
@@ -563,7 +563,7 @@ impl GameState {
             if let Some(player) = self.players.get_mut(player_id) {
                 player.stack += amount_to_return;
                 self.pot -= amount_to_return;
-                self.cur_bets[player_idx] = second_highest_bet;
+                self.bets[player_idx] = second_highest_bet;
                 // 创建一个消息来通知筹码返还
                 return vec![ServerMessage::BetReturned {
                     player_id: *player_id,
@@ -621,7 +621,7 @@ impl GameState {
             .enumerate()
             .map(|(idx, id)| Contributor {
                 id: *id,
-                bet_amount: self.cur_bets[idx],
+                bet_amount: self.bets[idx],
                 rank: player_hand_ranks.get(id).cloned(),
             })
             .collect();
@@ -841,7 +841,7 @@ mod tests {
         assert_eq!(state.players.get(&sb_id).unwrap().stack, 990);
         assert_eq!(state.players.get(&bb_id).unwrap().stack, 980);
         assert_eq!(state.pot, 30);
-        assert_eq!(state.cur_max_bet, 20);
+        assert_eq!(state.max_bet, 20);
 
         // 验证第一个行动者 (大盲注之后)
         let first_actor_idx = state.cur_player_idx;
@@ -1026,7 +1026,7 @@ mod tests {
 
         // p3 (UTG) 加注到 60
         state.handle_player_action(p3_id, PlayerAction::BetOrRaise(60));
-        assert_eq!(state.cur_max_bet, 60);
+        assert_eq!(state.max_bet, 60);
         assert_eq!(state.players.get(&p3_id).unwrap().stack, 940);
 
         // p0 (Dealer) 跟注 60
@@ -1035,7 +1035,7 @@ mod tests {
 
         // p1 (SB) 再加注到 180
         state.handle_player_action(p1_id, PlayerAction::BetOrRaise(170));
-        assert_eq!(state.cur_max_bet, 180);
+        assert_eq!(state.max_bet, 180);
         assert_eq!(state.players.get(&p1_id).unwrap().stack, 820); // 1000 - 180
 
         // p2 (BB) 弃牌
@@ -1079,7 +1079,7 @@ mod tests {
         state.handle_player_action(p1_id, PlayerAction::Call);
         assert_eq!(state.players.get(&p1_id).unwrap().stack, 0);
         assert_eq!(state.players.get(&p1_id).unwrap().state, PlayerState::AllIn);
-        assert_eq!(state.cur_bets[1], 15); // SB 10 + Call 5
+        assert_eq!(state.bets[1], 15); // SB 10 + Call 5
     }
 
     #[test]
@@ -1214,7 +1214,7 @@ mod tests {
 
         // 模拟下注: P0 all-in 50, P1 all-in 200, P2 跟注 200
         state.pot = 450;
-        state.cur_bets = vec![50, 200, 200];
+        state.bets = vec![50, 200, 200];
         // **FIX**: 同步更新玩家的stack值
         state.players.get_mut(&p0_id).unwrap().stack = 0;
         state.players.get_mut(&p1_id).unwrap().stack = 0;
@@ -1282,7 +1282,7 @@ mod tests {
 
         // 模拟下注: P0下注500, P1跟注all-in 300
         state.pot = 500 + 300;
-        state.cur_bets = vec![500, 300];
+        state.bets = vec![500, 300];
         // **FIX**: 同步更新玩家的stack值
         state.players.get_mut(&p0_id).unwrap().stack = 500;
         state.players.get_mut(&p1_id).unwrap().stack = 0;
@@ -1308,7 +1308,7 @@ mod tests {
         // 在摊牌前，P0未被跟注的200应该被退回
         state.return_uncalled_bets();
         assert_eq!(state.pot, 600); // 300 from P0, 300 from P1
-        assert_eq!(state.cur_bets, vec![300, 300]);
+        assert_eq!(state.bets, vec![300, 300]);
         // P0 初始1000, 下注500, 退回200. 剩余 700
         assert_eq!(state.players.get(&p0_id).unwrap().stack, 700);
 
@@ -1333,7 +1333,7 @@ mod tests {
 
         // 模拟下注: P0 all-in 50, P1 和 P2 都跟注到了500
         state.pot = 50 + 500 + 500;
-        state.cur_bets = vec![50, 500, 500];
+        state.bets = vec![50, 500, 500];
         // **FIX**: 同步更新玩家的stack值
         state.players.get_mut(&p0_id).unwrap().stack = 0;
         state.players.get_mut(&p1_id).unwrap().stack = 0;
@@ -1400,7 +1400,7 @@ mod tests {
 
         // p2 加注，额外增加40 (总额到60)
         state.handle_player_action(p2_id, PlayerAction::BetOrRaise(40));
-        assert_eq!(state.cur_max_bet, 60);
+        assert_eq!(state.max_bet, 60);
 
         // 因为p2加注了，行动权应该回到p0
         assert_eq!(state.current_player_id(), Some(p0_id));
@@ -1557,7 +1557,7 @@ mod tests {
         // 轮到 SB 行动
         assert!(matches!(messages[3], ServerMessage::NextToAct { player_id } if player_id == p_sb));
         assert_eq!(state.pot, 250); // 100 + 150
-        assert_eq!(state.cur_max_bet, 200); // BB All-in 后，最高下注是150 （但是后续玩家仍应该投注200）
+        assert_eq!(state.max_bet, 200); // BB All-in 后，最高下注是150 （但是后续玩家仍应该投注200）
 
         // 2. SB 跟注
         let messages = state.handle_player_action(p_sb, PlayerAction::Call);
