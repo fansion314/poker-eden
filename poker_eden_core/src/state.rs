@@ -35,6 +35,7 @@ pub struct GameState {
     pub cur_bets: Vec<u32>,
     // 在每轮下注开始时重置为 all false
     // 当玩家加注时，其他人的此状态会被重置为 false
+    #[serde(skip)]
     pub(crate) player_has_acted: Vec<bool>,
 
     pub cur_player_idx: usize,  // 当前应该行动的玩家在 hand_player_order 中的索引
@@ -56,7 +57,7 @@ pub struct Player {
     pub seat_id: Option<u8>,  // 座位号（总共若干座位）由用户自己选择座位
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum GamePhase {
     WaitingForPlayers,
     PreFlop,

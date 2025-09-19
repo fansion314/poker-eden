@@ -1,6 +1,7 @@
 use crate::card::*;
+use crate::message::{ServerMessage, ShowdownResult};
 use crate::state::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 // --- 核心游戏流程函数 ---
 impl GameState {
@@ -13,13 +14,17 @@ impl GameState {
     /// - 处理大小盲注。
     /// - 设置游戏阶段为 PreFlop，并确定第一个行动的玩家。
     ///
+    /// # Returns
+    /// 返回一个消息列表，描述新牌局开始时发生的事件 (如：盲注、轮到谁行动等)。
     /// # Panics
     /// 如果活跃玩家少于2人，则会 panic，因为游戏无法开始。
-    pub fn start_new_hand(&mut self) {
+    pub fn start_new_hand(&mut self) -> Vec<ServerMessage> {
         // 外部调用者负责旋转庄家按钮
         // state.seated_players.rotate_left(1);
 
-        // 0. 在新一局开始前，将所有离线玩家的状态变更为离席
+        let mut messages = Vec::new();
+
+        // 在新一局开始前，将所有离线玩家的状态变更为离席
         for player_id in self.seated_players.iter() {
             if let Some(p) = self.players.get_mut(player_id) {
                 if p.state == PlayerState::Offline || p.stack == 0 {
@@ -28,24 +33,40 @@ impl GameState {
             }
         }
 
-        // 1. 验证游戏开始的条件 (从轮换后的新顺序中过滤)
+        // 验证游戏开始的条件 (从轮换后的新顺序中过滤)
         self.hand_player_order = self
             .seated_players
             .iter()
-            .filter(|id| self.players.get(id).map_or(false, |p| p.state != PlayerState::SittingOut && p.stack > 0))
+            .filter(|id| {
+                self.players
+                    .get(id)
+                    .map_or(false, |p| p.state != PlayerState::SittingOut && p.stack > 0)
+            })
             .cloned()
             .collect();
 
         let active_player_count = self.hand_player_order.len();
         if active_player_count < 2 {
             self.phase = GamePhase::WaitingForPlayers;
-            return;
+            return messages; // 无法开始，返回空消息列表
         }
 
         // 更新 PlayerId -> index 的映射
-        self.player_indices = self.hand_player_order.iter().enumerate().map(|(i, id)| (*id, i)).collect();
+        self.player_indices = self
+            .hand_player_order
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (*id, i))
+            .collect();
 
-        // 2. 重置游戏状态
+        // 发送新牌局开始的消息
+        messages.push(ServerMessage::HandStarted {
+            hand_player_order: self.hand_player_order.clone(),
+            // 庄家总是 hand_player_order 的第一个
+            dealer_id: self.hand_player_order[0],
+        });
+
+        // 重置状态
         self.pot = 0;
         self.community_cards = vec![None; 5];
         self.cur_max_bet = 0;
@@ -58,11 +79,11 @@ impl GameState {
         // 初始化最小加注额为大盲注
         self.last_raise_amount = self.big_blind;
 
-        // 3. 创建和洗牌
+        // 洗牌
         let total_cards_needed = active_player_count * 2 + 5;
         self.deck = generate_random_hand(total_cards_needed);
 
-        // 4. 发底牌并设置玩家状态
+        // 发底牌并设置玩家状态
         for (idx, player_id) in self.hand_player_order.iter().enumerate() {
             if let Some(player) = self.players.get_mut(player_id) {
                 player.state = PlayerState::Playing;
@@ -102,7 +123,17 @@ impl GameState {
         sb_player.stack -= sb_amount;
         self.pot += sb_amount;
         self.cur_bets[sb_idx] = sb_amount;
-        if sb_player.stack == 0 { sb_player.state = PlayerState::AllIn; }
+        if sb_player.stack == 0 {
+            sb_player.state = PlayerState::AllIn;
+        }
+        // 为小盲注生成 PlayerActed 消息
+        messages.push(ServerMessage::PlayerActed {
+            player_id: sb_id,
+            action: PlayerAction::BetOrRaise(sb_amount),
+            total_bet_this_round: self.cur_bets[sb_idx],
+            new_stack: self.players.get(&sb_id).unwrap().stack,
+            new_pot: self.pot,
+        });
 
         // 大盲注
         let bb_id = self.hand_player_order[bb_idx];
@@ -111,13 +142,30 @@ impl GameState {
         bb_player.stack -= bb_amount;
         self.pot += bb_amount;
         self.cur_bets[bb_idx] = bb_amount;
-        if bb_player.stack == 0 { bb_player.state = PlayerState::AllIn; }
+        if bb_player.stack == 0 {
+            bb_player.state = PlayerState::AllIn;
+        }
+        // 为大盲注生成 PlayerActed 消息
+        messages.push(ServerMessage::PlayerActed {
+            player_id: bb_id,
+            action: PlayerAction::BetOrRaise(bb_amount),
+            total_bet_this_round: self.cur_bets[bb_idx],
+            new_stack: self.players.get(&bb_id).unwrap().stack,
+            new_pot: self.pot,
+        });
 
         self.cur_max_bet = self.big_blind;
 
-        // 6. 设置游戏阶段和第一个行动者
+        // 设置游戏阶段和第一个行动者
         self.phase = GamePhase::PreFlop;
         self.cur_player_idx = first_to_act_idx;
+
+        // 增加轮到谁行动的消息
+        messages.push(ServerMessage::NextToAct {
+            player_id: self.hand_player_order[self.cur_player_idx],
+        });
+
+        messages
     }
 
     /// 处理自动玩家（如离线玩家）的行动。
@@ -126,34 +174,37 @@ impl GameState {
     /// 当轮到一个需要人类输入的玩家时，它会返回 false。
     ///
     /// # Returns
-    /// - `true`: 如果一个自动行动被执行了，意味着游戏状态已推进，可能需要再次调用 tick。
-    /// - `false`: 如果当前轮到人类玩家行动，或者游戏已结束/等待，无需再自动 tick。
-    pub fn tick(&mut self) -> bool {
+    /// - `(bool, Vec<ServerMessage>)`: 元组的第一个元素表示是否执行了自动行动，
+    ///   第二个元素是该行动产生的消息列表。
+    pub fn tick(&mut self) -> (bool, Vec<ServerMessage>) {
         // 游戏结束、等待或没有轮到任何人行动
-        if self.phase == GamePhase::Showdown {
-            return false;
+        if matches!(
+            self.phase,
+            GamePhase::WaitingForPlayers | GamePhase::Showdown
+        ) {
+            return (false, vec![]);
         }
 
         let player_id = self.current_player_id().unwrap();
+        let is_auto_action = self
+            .players
+            .get(&player_id)
+            .map_or(false, |p| p.state == PlayerState::Offline);
 
-        let is_offline = self.players.get(&player_id).map_or(false, |p| p.state == PlayerState::Offline);
-
-        if is_offline {
+        if is_auto_action {
             let player_idx = *self.player_indices.get(&player_id).unwrap();
-            let player_total_bet = self.cur_bets[player_idx];
-            let amount_to_call = self.cur_max_bet - player_total_bet;
-
-            // 离线玩家的逻辑：能过牌就过牌，否则就弃牌
+            let amount_to_call = self.cur_max_bet - self.cur_bets[player_idx];
             let action = if amount_to_call == 0 {
                 PlayerAction::Check
             } else {
                 PlayerAction::Fold
             };
 
-            self.handle_player_action(player_id, action);
-            true // 执行了自动操作
+            // 调用 handle_player_action 并捕获其返回的消息
+            let messages = self.handle_player_action(player_id, action);
+            (true, messages)
         } else {
-            false // 轮到人类玩家
+            (false, vec![])
         }
     }
 
@@ -168,8 +219,18 @@ impl GameState {
     /// 在处理完动作后，它会检查当前下注轮是否结束。
     /// 如果是，则推进到下一个游戏阶段 (e.g., Flop -> Turn)。
     /// 如果否，则将行动权转移给下一个玩家。
-    pub fn handle_player_action(&mut self, player_id: PlayerId, action: PlayerAction) {
-        if self.current_player_id() != Some(player_id) { return; }
+    ///
+    /// # Returns
+    /// 返回一个消息列表，描述该动作引发的所有状态变更。
+    pub fn handle_player_action(
+        &mut self,
+        player_id: PlayerId,
+        action: PlayerAction,
+    ) -> Vec<ServerMessage> {
+        let mut messages = Vec::new();
+        if self.current_player_id() != Some(player_id) {
+            return messages;
+        }
 
         let player_idx = *self.player_indices.get(&player_id).unwrap();
         let player_total_bet = self.cur_bets[player_idx];
@@ -183,7 +244,9 @@ impl GameState {
                 }
                 PlayerAction::Check => {
                     // 必须是无人下注（或大盲注无人加注）时才能过牌
-                    if amount_to_call != 0 { return; }
+                    if amount_to_call != 0 {
+                        return messages;
+                    }
                 }
                 PlayerAction::Call => {
                     if amount_to_call > 0 {
@@ -191,30 +254,40 @@ impl GameState {
                         player.stack -= call_amount;
                         self.pot += call_amount;
                         self.cur_bets[player_idx] += call_amount;
-                        if player.stack == 0 { player.state = PlayerState::AllIn; }
+                        if player.stack == 0 {
+                            player.state = PlayerState::AllIn;
+                        }
                     }
                 }
                 PlayerAction::BetOrRaise(raise_amount) => {
                     // raise_amount 是本次行动额外增加的筹码
 
                     // 基本条件: 增加的额度 > 0，且小于等于自己的总筹码
-                    if raise_amount == 0 || raise_amount > player.stack { return; }
+                    if raise_amount == 0 || raise_amount > player.stack {
+                        return messages;
+                    }
 
                     let new_total_bet = player_total_bet + raise_amount;
 
                     // 如果是翻牌后的第一轮下注 (Bet)，下注额必须大于等于大盲注 (除非是All-in)
                     if self.cur_max_bet == 0 {
-                        if raise_amount < self.big_blind && player.stack > raise_amount { return; }
+                        if raise_amount < self.big_blind && player.stack > raise_amount {
+                            return messages;
+                        }
                     }
                     // 如果是加注 (Raise)
                     else {
                         // 新的总下注额必须大于当前最高下注额
-                        if new_total_bet <= self.cur_max_bet { return; }
+                        if new_total_bet <= self.cur_max_bet {
+                            return messages;
+                        }
 
                         // 验证加注额是否符合最小加注规则
                         let raise_diff = new_total_bet - self.cur_max_bet;
                         // 加注的差额必须大于等于上一个加注的差额 (All-in除外)
-                        if raise_diff < self.last_raise_amount && player.stack > raise_amount { return; }
+                        if raise_diff < self.last_raise_amount && player.stack > raise_amount {
+                            return messages;
+                        }
                     }
 
                     // 更新状态
@@ -231,7 +304,9 @@ impl GameState {
                         self.cur_max_bet = new_total_bet;
                     }
 
-                    if player.stack == 0 { player.state = PlayerState::AllIn; }
+                    if player.stack == 0 {
+                        player.state = PlayerState::AllIn;
+                    }
 
                     // 当有人加注时，其他所有未弃牌的玩家都需要重新行动一轮。
                     for (i, p_id) in self.hand_player_order.iter().enumerate() {
@@ -247,33 +322,49 @@ impl GameState {
             }
         }
 
-        // NOTE: 无论玩家做什么动作，他都在本轮“表态”了。
+        // 创建 PlayerActed 消息
+        let player = self.players.get(&player_id).unwrap();
+        messages.push(ServerMessage::PlayerActed {
+            player_id,
+            action, // 将传入的 action 克隆或复制到消息中
+            total_bet_this_round: self.cur_bets[player_idx],
+            new_stack: player.stack,
+            new_pot: self.pot,
+        });
+
         self.player_has_acted[player_idx] = true;
 
         // 检查是否只剩一人未弃牌
-        let players_in_hand: Vec<_> = self.hand_player_order.iter()
-            .filter(|id| self.players.get(id).map_or(false, |p| p.state != PlayerState::Folded))
+        let players_in_hand: Vec<_> = self
+            .hand_player_order
+            .iter()
+            .filter(|id| {
+                self.players
+                    .get(id)
+                    .map_or(false, |p| p.state != PlayerState::Folded)
+            })
             .cloned()
             .collect();
 
         if players_in_hand.len() <= 1 {
             // 如果是，直接分配底池，结束这局
             self.phase = GamePhase::Showdown;
-            self.distribute_pot_to_single_winner_group(players_in_hand);
-            return;
+            messages.extend(self.distribute_pot_to_single_winner_group(players_in_hand));
+            return messages;
         }
 
         if self.check_betting_round_over() {
-            self.advance_to_next_phase();
+            messages.extend(self.advance_to_next_phase());
         } else {
-            self.advance_to_next_player();
+            messages.extend(self.advance_to_next_player());
         }
+        messages
     }
 
     // --- 辅助逻辑函数 ---
 
     /// 将行动权转移给下一位合法的玩家
-    fn advance_to_next_player(&mut self) {
+    fn advance_to_next_player(&mut self) -> Vec<ServerMessage> {
         let mut current_idx = self.cur_player_idx;
 
         // 循环查找下一个可以行动的玩家
@@ -282,11 +373,16 @@ impl GameState {
             let next_player_id = self.hand_player_order[current_idx];
             if let Some(player) = self.players.get(&next_player_id) {
                 if player.state == PlayerState::Playing && !self.player_has_acted[current_idx] {
+                    // 找到后...
                     self.cur_player_idx = current_idx;
-                    return;
+                    // 返回 NextToAct 消息
+                    return vec![ServerMessage::NextToAct {
+                        player_id: self.hand_player_order[self.cur_player_idx],
+                    }];
                 }
             }
         }
+        vec![]
     }
 
     /// 检查当前下注轮是否结束
@@ -300,20 +396,31 @@ impl GameState {
     /// - 加注后重新开始一轮: 当有人加注，其他玩家的 `player_has_acted` 会被重置为 false，强迫他们必须再次行动。
     fn check_betting_round_over(&self) -> bool {
         // 找到所有还在牌局中且未 all-in 的玩家
-        let players_to_act: Vec<(usize, &Player)> = self.hand_player_order.iter().enumerate()
+        let players_to_act: Vec<(usize, &Player)> = self
+            .hand_player_order
+            .iter()
+            .enumerate()
             .filter_map(|(idx, id)| self.players.get(id).map(|p| (idx, p)))
             .filter(|(_, p)| p.state != PlayerState::Folded && p.state != PlayerState::AllIn)
             .collect();
 
-        if players_to_act.is_empty() { return true; }
+        if players_to_act.is_empty() {
+            return true;
+        }
 
         // 检查这些玩家的下注额是否都等于当前最高下注额
-        let all_bets_match = players_to_act.iter().all(|(idx, _)| self.cur_bets[*idx] == self.cur_max_bet);
+        let all_bets_match = players_to_act
+            .iter()
+            .all(|(idx, _)| self.cur_bets[*idx] == self.cur_max_bet);
 
-        if !all_bets_match { return false; }
+        if !all_bets_match {
+            return false;
+        }
 
         // 检查这些玩家是否都已经行动过
-        let all_have_acted = players_to_act.iter().all(|(idx, _)| self.player_has_acted[*idx]);
+        let all_have_acted = players_to_act
+            .iter()
+            .all(|(idx, _)| self.player_has_acted[*idx]);
 
         all_have_acted
     }
@@ -325,7 +432,8 @@ impl GameState {
     /// - 重置新一轮的下注状态。
     /// - 确定下一轮第一个行动的玩家 (通常是庄家左边的第一个未弃牌玩家)。
     /// - 如果已是 River 结束，则进入 Showdown (摊牌)阶段。
-    fn advance_to_next_phase(&mut self) {
+    fn advance_to_next_phase(&mut self) -> Vec<ServerMessage> {
+        let mut messages = Vec::new();
         // 为新一轮下注重置所有玩家的行动状态
         self.player_has_acted.fill(false);
         // 重置最小加注额为大盲注，用于下一轮下注
@@ -335,24 +443,39 @@ impl GameState {
         match self.phase {
             GamePhase::PreFlop => {
                 self.phase = GamePhase::Flop;
-                self.community_cards[0] = self.deck.pop();
-                self.community_cards[1] = self.deck.pop();
-                self.community_cards[2] = self.deck.pop();
+                let c1 = self.deck.pop().unwrap();
+                let c2 = self.deck.pop().unwrap();
+                let c3 = self.deck.pop().unwrap();
+                self.community_cards[0..3].copy_from_slice(&[Some(c1), Some(c2), Some(c3)]);
+                messages.push(ServerMessage::CommunityCardsDealt {
+                    phase: self.phase,
+                    cards: vec![c1, c2, c3],
+                });
             }
             GamePhase::Flop => {
                 self.phase = GamePhase::Turn;
-                self.community_cards[3] = self.deck.pop();
+                let c = self.deck.pop().unwrap();
+                self.community_cards[3] = Some(c);
+                messages.push(ServerMessage::CommunityCardsDealt {
+                    phase: self.phase,
+                    cards: vec![c],
+                });
             }
             GamePhase::Turn => {
                 self.phase = GamePhase::River;
-                self.community_cards[4] = self.deck.pop();
+                let c = self.deck.pop().unwrap();
+                self.community_cards[4] = Some(c);
+                messages.push(ServerMessage::CommunityCardsDealt {
+                    phase: self.phase,
+                    cards: vec![c],
+                });
             }
             GamePhase::River => {
                 self.phase = GamePhase::Showdown;
-                self.handle_showdown();
-                return;
+                messages.extend(self.handle_showdown());
+                return messages;
             }
-            _ => return, // 其他阶段不应调用此函数
+            _ => return messages,
         }
 
         // 确定下一轮有多少玩家可以行动 (未弃牌且未全下)
@@ -368,34 +491,70 @@ impl GameState {
 
         // 如果可以行动的玩家少于2人（0或1），则没有更多下注轮，直接发完所有公共牌进入摊牌
         if potential_actors.len() < 2 {
-            while let Some(pos) = self.community_cards.iter().position(|c| c.is_none()) {
-                if let Some(card) = self.deck.pop() {
-                    self.community_cards[pos] = Some(card);
-                } else {
-                    break; // 牌堆没牌了
+            loop {
+                match self.phase {
+                    GamePhase::PreFlop => {
+                        self.phase = GamePhase::Flop;
+                        let c1 = self.deck.pop().unwrap();
+                        let c2 = self.deck.pop().unwrap();
+                        let c3 = self.deck.pop().unwrap();
+                        self.community_cards[0..3].copy_from_slice(&[Some(c1), Some(c2), Some(c3)]);
+                        messages.push(ServerMessage::CommunityCardsDealt {
+                            phase: self.phase,
+                            cards: vec![c1, c2, c3],
+                        });
+                    }
+                    GamePhase::Flop => {
+                        self.phase = GamePhase::Turn;
+                        let c = self.deck.pop().unwrap();
+                        self.community_cards[3] = Some(c);
+                        messages.push(ServerMessage::CommunityCardsDealt {
+                            phase: self.phase,
+                            cards: vec![c],
+                        });
+                    }
+                    GamePhase::Turn => {
+                        self.phase = GamePhase::River;
+                        let c = self.deck.pop().unwrap();
+                        self.community_cards[4] = Some(c);
+                        messages.push(ServerMessage::CommunityCardsDealt {
+                            phase: self.phase,
+                            cards: vec![c],
+                        });
+                    }
+                    _ => break,
                 }
             }
+
             self.phase = GamePhase::Showdown;
-            self.handle_showdown();
+            messages.extend(self.handle_showdown());
         } else {
             // 否则，正常开始下一轮，设置第一个可以行动的玩家
             self.cur_player_idx = potential_actors[0];
+            messages.push(ServerMessage::NextToAct {
+                player_id: self.hand_player_order[self.cur_player_idx],
+            });
         }
+
+        messages
     }
 
     /// 处理摊牌逻辑
     ///
     /// - 找出所有未弃牌的玩家。
     /// - 调用新的分池函数来处理奖金分配
-    fn handle_showdown(&mut self) {
-        self.return_uncalled_bets();
-        self.distribute_pots();
+    fn handle_showdown(&mut self) -> Vec<ServerMessage> {
+        let mut m = Vec::new();
+        m.extend(self.return_uncalled_bets());
+        m.extend(self.distribute_pots());
+        m
     }
 
     /// 在摊牌前，返还任何玩家未被跟注的下注部分 (逻辑已修正)
     /// 例如: P1下注500，P2只有200并跟注All-in。P1未被跟注的300将在这里返还。
-    fn return_uncalled_bets(&mut self) {
-        let mut players_in_showdown: Vec<_> = self.hand_player_order
+    fn return_uncalled_bets(&mut self) -> Vec<ServerMessage> {
+        let mut players_in_showdown: Vec<_> = self
+            .hand_player_order
             .iter()
             .enumerate()
             .filter(|(_, id)| {
@@ -406,7 +565,7 @@ impl GameState {
             .collect();
 
         if players_in_showdown.len() < 2 {
-            return;
+            return vec![];
         }
 
         // 按下注额从高到低排序
@@ -425,8 +584,15 @@ impl GameState {
                 player.stack += amount_to_return;
                 self.pot -= amount_to_return;
                 self.cur_bets[player_idx] = second_highest_bet;
+                // 创建一个消息来通知筹码返还
+                return vec![ServerMessage::BetReturned {
+                    player_id: *player_id,
+                    amount: amount_to_return,
+                    new_stack: player.stack,
+                }];
             }
         }
+        vec![]
     }
 
     /// 处理包含边池的复杂奖池分配
@@ -440,8 +606,10 @@ impl GameState {
     ///    - 处理下一个额度（如200），形成边池。投入额为 (200-50)=150。所有下注额大于等于200的玩家都向此池投入150。
     ///    - 找出有资格争夺此边池的赢家，分配奖金。
     /// 4. 循环此过程，直到所有奖池分配完毕。
-    fn distribute_pots(&mut self) {
-        if self.pot == 0 { return; }
+    fn distribute_pots(&mut self) -> Vec<ServerMessage> {
+        if self.pot == 0 {
+            return vec![];
+        }
 
         #[derive(Debug, Clone)]
         struct Contributor {
@@ -452,7 +620,8 @@ impl GameState {
 
         // 1. 收集所有玩家信息
         let mut player_hand_ranks = HashMap::new();
-        let revealed_community_cards: Vec<Card> = self.community_cards.iter().flatten().cloned().collect();
+        let revealed_community_cards: Vec<Card> =
+            self.community_cards.iter().flatten().cloned().collect();
 
         for (idx, player_id) in self.hand_player_order.iter().enumerate() {
             let player = self.players.get(player_id).unwrap();
@@ -466,19 +635,29 @@ impl GameState {
             }
         }
 
-        let contributors: Vec<Contributor> = self.hand_player_order.iter().enumerate().map(|(idx, id)| Contributor {
-            id: *id,
-            bet_amount: self.cur_bets[idx],
-            rank: player_hand_ranks.get(id).cloned(),
-        }).collect();
+        let contributors: Vec<Contributor> = self
+            .hand_player_order
+            .iter()
+            .enumerate()
+            .map(|(idx, id)| Contributor {
+                id: *id,
+                bet_amount: self.cur_bets[idx],
+                rank: player_hand_ranks.get(id).cloned(),
+            })
+            .collect();
 
         // 2. 获取所有不重复的下注额度，并排序
-        let mut bet_levels: Vec<u32> = contributors.iter().map(|c| c.bet_amount).filter(|&b| b > 0).collect();
+        let mut bet_levels: Vec<u32> = contributors
+            .iter()
+            .map(|c| c.bet_amount)
+            .filter(|&b| b > 0)
+            .collect();
         bet_levels.sort_unstable();
         bet_levels.dedup();
 
         let mut last_level = 0;
-        let mut all_winners_this_hand = HashSet::new();
+        // 收集每个玩家的总赢款
+        let mut total_winnings: HashMap<PlayerId, u32> = HashMap::new();
 
         // 3. 遍历每个下注额度，形成并分配主池/边池
         for level in bet_levels {
@@ -530,40 +709,100 @@ impl GameState {
                 let remainder = current_pot % winners.len() as u32;
                 for (i, winner_id) in winners.iter().enumerate() {
                     if let Some(player) = self.players.get_mut(winner_id) {
-                        player.stack += win_amount + if i == 0 { remainder } else { 0 };
+                        let win_amount = win_amount + if i == 0 { remainder } else { 0 };
+                        player.stack += win_amount;
+                        *total_winnings.entry(*winner_id).or_insert(0) += win_amount;
                     }
-                    all_winners_this_hand.insert(*winner_id);
                 }
             }
             last_level = level;
         }
 
         // 7. 更新所有赢家的胜利次数
-        for winner_id in all_winners_this_hand {
-            if let Some(player) = self.players.get_mut(&winner_id) {
+        for winner_id in total_winnings.keys() {
+            if let Some(player) = self.players.get_mut(winner_id) {
                 player.wins += 1;
             }
         }
 
+        // 构建 ShowdownResult
+        let results: Vec<ShowdownResult> = player_hand_ranks
+            .into_iter()
+            .map(|(id, rank)| {
+                let player_idx = self.player_indices[&id];
+                let (c1, c2) = self.player_cards[player_idx];
+                ShowdownResult {
+                    player_id: id,
+                    hand_rank: Some(rank),
+                    cards: Some((c1.unwrap(), c2.unwrap())),
+                    winnings: total_winnings.get(&id).cloned().unwrap_or(0),
+                }
+            })
+            .collect();
+
         self.pot = 0;
+
+        // 返回单个 Showdown 消息
+        vec![ServerMessage::Showdown { results }]
     }
 
-    /// 将奖池分配给唯一的赢家/赢家组 (没有边池的简单情况)
-    fn distribute_pot_to_single_winner_group(&mut self, winners: Vec<PlayerId>) {
-        if winners.is_empty() || self.pot == 0 { return; }
+    fn distribute_pot_to_single_winner_group(
+        &mut self,
+        winners: Vec<PlayerId>,
+    ) -> Vec<ServerMessage> {
+        if winners.is_empty() || self.pot == 0 {
+            return vec![];
+        }
 
         let win_amount_per_player = self.pot / winners.len() as u32;
         let remainder = self.pot % winners.len() as u32;
 
-        for (i, winner_id) in winners.iter().enumerate() {
-            if let Some(player) = self.players.get_mut(winner_id) {
-                player.stack += win_amount_per_player + if i == 0 { remainder } else { 0 };
+        let community = self
+            .community_cards
+            .iter()
+            .flatten()
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let results = winners
+            .iter()
+            .enumerate()
+            .map(|(i, winner_id)| {
+                let player = self.players.get_mut(winner_id).unwrap();
+                let winnings = win_amount_per_player + if i == 0 { remainder } else { 0 };
+                player.stack += winnings;
                 player.wins += 1;
-            }
-        }
+                if community.len() >= 3 {
+                    let player_idx = self.player_indices[winner_id];
+                    let (Some(c1), Some(c2)) = self.player_cards[player_idx] else {
+                        unreachable!()
+                    };
+                    let mut all_cards = community.clone();
+                    all_cards.push(c1);
+                    all_cards.push(c2);
+
+                    ShowdownResult {
+                        player_id: *winner_id,
+                        hand_rank: Some(find_best_hand(&all_cards)),
+                        cards: Some((c1, c2)),
+                        winnings,
+                    }
+                } else {
+                    ShowdownResult {
+                        player_id: *winner_id,
+                        hand_rank: None,
+                        cards: None,
+                        winnings,
+                    }
+                }
+            })
+            .collect();
+
         self.pot = 0;
+        vec![ServerMessage::Showdown { results }]
     }
 }
+
 // --- 单元测试 ---
 
 #[cfg(test)]
@@ -589,7 +828,7 @@ mod tests {
                 wins: 0,
                 losses: 0,
                 state: PlayerState::Waiting,
-                seat_id: Some(players.len() as u8),
+                seat_id: None,
             };
             players.insert(player_id, player);
             seated_players.push_back(player_id);
@@ -628,7 +867,10 @@ mod tests {
         let first_actor_idx = state.cur_player_idx;
         assert_eq!(first_actor_idx, 3);
         let first_actor_id = state.hand_player_order[first_actor_idx];
-        assert_eq!(state.players.get(&first_actor_id).unwrap().state, PlayerState::Playing);
+        assert_eq!(
+            state.players.get(&first_actor_id).unwrap().state,
+            PlayerState::Playing
+        );
     }
 
     #[test]
@@ -644,11 +886,17 @@ mod tests {
         // Note: 3人局，BB(p2)之后是Dealer(p0)行动
         state.cur_player_idx = 0;
         state.handle_player_action(p0_id, PlayerAction::Fold);
-        assert_eq!(state.players.get(&p0_id).unwrap().state, PlayerState::Folded);
+        assert_eq!(
+            state.players.get(&p0_id).unwrap().state,
+            PlayerState::Folded
+        );
 
         // p1行动
         state.handle_player_action(p1_id, PlayerAction::Fold);
-        assert_eq!(state.players.get(&p1_id).unwrap().state, PlayerState::Folded);
+        assert_eq!(
+            state.players.get(&p1_id).unwrap().state,
+            PlayerState::Folded
+        );
 
         // 现在只剩p2，游戏应该结束，p2赢得盲注
         assert_eq!(state.phase, GamePhase::Showdown);
@@ -739,7 +987,7 @@ mod tests {
         state.start_new_hand();
 
         let dealer_id = p_ids[0]; // 庄家
-        let bb_id = p_ids[1];     // 大盲
+        let bb_id = p_ids[1]; // 大盲
 
         // 庄家(p0)是小盲
         assert_eq!(state.players.get(&dealer_id).unwrap().stack, 990);
@@ -812,7 +1060,10 @@ mod tests {
 
         // p2 (BB) 弃牌
         state.handle_player_action(p2_id, PlayerAction::Fold);
-        assert_eq!(state.players.get(&p2_id).unwrap().state, PlayerState::Folded);
+        assert_eq!(
+            state.players.get(&p2_id).unwrap().state,
+            PlayerState::Folded
+        );
 
         // 轮回到 p3，他需要补齐差额 (180 - 60 = 120)
         assert_eq!(state.current_player_id(), Some(p3_id));
@@ -940,9 +1191,15 @@ mod tests {
             Some(Card::new(Rank::Four, Suit::Club)),
         ];
         // p2 (BB): 一对A
-        state.player_cards[2] = (Some(Card::new(Rank::Ace, Suit::Club)), Some(Card::new(Rank::Queen, Suit::Diamond)));
+        state.player_cards[2] = (
+            Some(Card::new(Rank::Ace, Suit::Club)),
+            Some(Card::new(Rank::Queen, Suit::Diamond)),
+        );
         // p3 (UTG): 一对K
-        state.player_cards[3] = (Some(Card::new(Rank::King, Suit::Club)), Some(Card::new(Rank::Queen, Suit::Spade)));
+        state.player_cards[3] = (
+            Some(Card::new(Rank::King, Suit::Club)),
+            Some(Card::new(Rank::Queen, Suit::Spade)),
+        );
 
         // --- 河牌圈 (River) ---
         // BB 下注 200
@@ -996,9 +1253,18 @@ mod tests {
             Some(Card::new(Rank::Queen, Suit::Diamond)),
             Some(Card::new(Rank::Two, Suit::Spade)),
         ];
-        state.player_cards[0] = (Some(Card::new(Rank::King, Suit::Spade)), Some(Card::new(Rank::King, Suit::Heart))); // P0: 葫芦 (A, K)
-        state.player_cards[1] = (Some(Card::new(Rank::Queen, Suit::Spade)), Some(Card::new(Rank::Jack, Suit::Club)));    // P1: 两对 (A, Q)
-        state.player_cards[2] = (Some(Card::new(Rank::Ace, Suit::Diamond)), Some(Card::new(Rank::Ten, Suit::Club)));     // P2: 三条 (A)
+        state.player_cards[0] = (
+            Some(Card::new(Rank::King, Suit::Spade)),
+            Some(Card::new(Rank::King, Suit::Heart)),
+        ); // P0: 葫芦 (A, K)
+        state.player_cards[1] = (
+            Some(Card::new(Rank::Queen, Suit::Spade)),
+            Some(Card::new(Rank::Jack, Suit::Club)),
+        ); // P1: 两对 (A, Q)
+        state.player_cards[2] = (
+            Some(Card::new(Rank::Ace, Suit::Diamond)),
+            Some(Card::new(Rank::Ten, Suit::Club)),
+        ); // P2: 三条 (A)
 
         state.handle_showdown();
 
@@ -1050,8 +1316,14 @@ mod tests {
             Some(Card::new(Rank::Two, Suit::Heart)),
             Some(Card::new(Rank::Three, Suit::Club)),
         ];
-        state.player_cards[0] = (Some(Card::new(Rank::Ace, Suit::Spade)), Some(Card::new(Rank::Ace, Suit::Heart)));
-        state.player_cards[1] = (Some(Card::new(Rank::King, Suit::Spade)), Some(Card::new(Rank::King, Suit::Heart)));
+        state.player_cards[0] = (
+            Some(Card::new(Rank::Ace, Suit::Spade)),
+            Some(Card::new(Rank::Ace, Suit::Heart)),
+        );
+        state.player_cards[1] = (
+            Some(Card::new(Rank::King, Suit::Spade)),
+            Some(Card::new(Rank::King, Suit::Heart)),
+        );
 
         // 在摊牌前，P0未被跟注的200应该被退回
         state.return_uncalled_bets();
@@ -1098,9 +1370,18 @@ mod tests {
             Some(Card::new(Rank::Two, Suit::Heart)),
             Some(Card::new(Rank::Three, Suit::Club)),
         ];
-        state.player_cards[0] = (Some(Card::new(Rank::Ace, Suit::Spade)), Some(Card::new(Rank::King, Suit::Spade)));
-        state.player_cards[1] = (Some(Card::new(Rank::Nine, Suit::Spade)), Some(Card::new(Rank::Eight, Suit::Spade)));
-        state.player_cards[2] = (Some(Card::new(Rank::Nine, Suit::Spade)), Some(Card::new(Rank::Eight, Suit::Spade)));
+        state.player_cards[0] = (
+            Some(Card::new(Rank::Ace, Suit::Spade)),
+            Some(Card::new(Rank::King, Suit::Spade)),
+        );
+        state.player_cards[1] = (
+            Some(Card::new(Rank::Nine, Suit::Spade)),
+            Some(Card::new(Rank::Eight, Suit::Spade)),
+        );
+        state.player_cards[2] = (
+            Some(Card::new(Rank::Nine, Suit::Spade)),
+            Some(Card::new(Rank::Eight, Suit::Spade)),
+        );
 
         state.handle_showdown();
 
@@ -1143,7 +1424,10 @@ mod tests {
 
         // 因为p2加注了，行动权应该回到p0
         assert_eq!(state.current_player_id(), Some(p0_id));
-        assert_eq!(state.players.get(&p0_id).unwrap().state, PlayerState::Playing);
+        assert_eq!(
+            state.players.get(&p0_id).unwrap().state,
+            PlayerState::Playing
+        );
 
         // p0 弃牌
         state.handle_player_action(p0_id, PlayerAction::Fold);
@@ -1178,7 +1462,7 @@ mod tests {
     /// 新增的单元测试：测试tick函数是否能正确处理离线玩家
     #[test]
     fn test_tick_for_offline_player_folds_when_facing_a_bet() {
-        let (mut state, p_ids) = setup_test_game(&[1000, 1000, 1000]);
+        let (mut state, _p_ids) = setup_test_game(&[1000, 1000, 1000]);
 
         // 旋转玩家顺序，让 p0 是庄家, p1 是小盲, p2 是大盲
         // 这样在3人局中，第一个行动的是 p0
@@ -1195,15 +1479,144 @@ mod tests {
 
         // 调用tick。因为p0需要跟大盲注20，所以他应该自动弃牌。
         // tick()执行了自动操作，所以返回true
-        assert_eq!(state.tick(), true);
+        assert_eq!(state.tick().0, true);
 
         // 验证p0已弃牌
-        assert_eq!(state.players.get(&p0_id).unwrap().state, PlayerState::Folded);
+        assert_eq!(
+            state.players.get(&p0_id).unwrap().state,
+            PlayerState::Folded
+        );
 
         // 验证行动权成功转移给了p1
         assert_eq!(state.current_player_id(), Some(p1_id));
 
         // 再次调用tick。因为p1是在线的，所以tick()不执行任何操作，返回false
-        assert_eq!(state.tick(), false);
+        assert_eq!(state.tick().0, false);
+    }
+
+    #[test]
+    fn test_scenario_fold_to_win() {
+        // 场景：3人游戏，UTG和SB相继弃牌，BB直接获胜
+        let (mut state, p_ids) = setup_test_game(&[10000, 10000, 10000]);
+        state.small_blind = 100;
+        state.big_blind = 200;
+        let p_dealer = p_ids[0]; // Dealer
+        let p_sb = p_ids[1]; // Small Blind
+        let p_bb = p_ids[2]; // Big Blind
+
+        // 1. 开始游戏
+        let messages = state.start_new_hand();
+        assert_eq!(messages.len(), 4);
+        assert!(matches!(messages[0], ServerMessage::HandStarted { .. }));
+        assert!(
+            matches!(messages[1], ServerMessage::PlayerActed { player_id, action: PlayerAction::BetOrRaise(100), .. } if player_id == p_sb)
+        );
+        assert!(
+            matches!(messages[2], ServerMessage::PlayerActed { player_id, action: PlayerAction::BetOrRaise(200), .. } if player_id == p_bb)
+        );
+        assert!(
+            matches!(messages[3], ServerMessage::NextToAct { player_id } if player_id == p_dealer)
+        ); // 轮到Dealer行动 (UTG)
+        assert_eq!(state.pot, 300);
+
+        // 2. Dealer (UTG) 弃牌
+        let messages = state.handle_player_action(p_dealer, PlayerAction::Fold);
+        assert_eq!(messages.len(), 2);
+        assert!(
+            matches!(messages[0], ServerMessage::PlayerActed { player_id, action: PlayerAction::Fold, .. } if player_id == p_dealer)
+        );
+        assert!(matches!(messages[1], ServerMessage::NextToAct { player_id } if player_id == p_sb)); // 轮到SB行动
+
+        // 3. SB 弃牌
+        let messages = state.handle_player_action(p_sb, PlayerAction::Fold);
+        // BB 是唯一的赢家
+        assert_eq!(messages.len(), 2);
+        assert!(
+            matches!(messages[0], ServerMessage::PlayerActed { player_id, action: PlayerAction::Fold, .. } if player_id == p_sb)
+        );
+
+        // 验证Showdown消息
+        if let ServerMessage::Showdown { results } = &messages[1] {
+            assert_eq!(results.len(), 1);
+            let winner_result = &results[0];
+            assert_eq!(winner_result.player_id, p_bb);
+            assert_eq!(winner_result.winnings, 300); // 赢得盲注
+            assert!(winner_result.cards.is_none()); // 不必展示牌
+            assert!(winner_result.hand_rank.is_none());
+        } else {
+            panic!("Expected a Showdown message");
+        }
+
+        // 验证BB的筹码
+        assert_eq!(state.players.get(&p_bb).unwrap().stack, 9800 + 300);
+    }
+
+    #[test]
+    fn test_scenario_preflop_all_in_and_call() {
+        // 场景: 2人游戏 (Heads-up), SB筹码很多, BB只有150 (少于大盲)
+        let (mut state, p_ids) = setup_test_game(&[10000, 150]);
+        state.small_blind = 100;
+        state.big_blind = 200;
+        let p_sb = p_ids[0];
+        let p_bb = p_ids[1];
+
+        // 修改BB的筹码
+        state.players.get_mut(&p_bb).unwrap().stack = 150;
+
+        // 1. 开始游戏
+        let messages = state.start_new_hand();
+        assert_eq!(messages.len(), 4);
+        // SB 下小盲注 100
+        assert!(
+            matches!(messages[1], ServerMessage::PlayerActed { player_id, new_stack: 9900, .. } if player_id == p_sb)
+        );
+        // BB All-in 150
+        assert!(
+            matches!(messages[2], ServerMessage::PlayerActed { player_id, new_stack: 0, total_bet_this_round: 150, .. } if player_id == p_bb)
+        );
+        // 轮到 SB 行动
+        assert!(matches!(messages[3], ServerMessage::NextToAct { player_id } if player_id == p_sb));
+        assert_eq!(state.pot, 250); // 100 + 150
+        assert_eq!(state.cur_max_bet, 200); // BB All-in 后，最高下注是150 （但是后续玩家仍应该投注200）
+
+        // 2. SB 跟注
+        let messages = state.handle_player_action(p_sb, PlayerAction::Call);
+        // 因为有人All-in, 并且下注轮结束，应该直接发完所有公共牌并进入摊牌
+        assert_eq!(messages.len(), 6); // Call, Flop, Turn, River, BetReturned, Showdown
+
+        // 验证 Call
+        assert!(
+            matches!(messages[0], ServerMessage::PlayerActed { player_id, action: PlayerAction::Call, new_stack: 9800, .. } if player_id == p_sb)
+        );
+        // 验证公共牌
+        assert!(
+            matches!(messages[1].clone(), ServerMessage::CommunityCardsDealt { phase: GamePhase::Flop, cards } if cards.len() == 3)
+        );
+        assert!(
+            matches!(messages[2].clone(), ServerMessage::CommunityCardsDealt { phase: GamePhase::Turn, cards } if cards.len() == 1)
+        );
+        assert!(
+            matches!(messages[3].clone(), ServerMessage::CommunityCardsDealt { phase: GamePhase::River, cards } if cards.len() == 1)
+        );
+        assert!(
+            matches!(messages[4].clone(), ServerMessage::BetReturned { player_id, amount: 50, new_stack: 9850 } if player_id == p_sb)
+        );
+
+        // 验证摊牌
+        if let ServerMessage::Showdown { results } = &messages[5] {
+            assert_eq!(results.len(), 2); // 两个玩家都参与了摊牌
+            assert!(results.iter().any(|r| r.player_id == p_sb));
+            assert!(results.iter().any(|r| r.player_id == p_bb));
+            let total_winnings: u32 = results.iter().map(|r| r.winnings).sum();
+            assert_eq!(total_winnings, 300); // 150 * 2
+
+            // 确保展示了牌和牌型
+            for res in results {
+                assert!(res.cards.is_some());
+                assert!(res.hand_rank.is_some());
+            }
+        } else {
+            panic!("Expected a Showdown message");
+        }
     }
 }
