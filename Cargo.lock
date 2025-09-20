@@ -860,7 +860,6 @@ dependencies = [
  "axum",
  "dashmap",
  "futures-util",
- "parking_lot",
  "poker_eden_core",
  "serde_json",
  "tokio",
