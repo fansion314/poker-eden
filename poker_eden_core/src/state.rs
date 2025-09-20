@@ -14,10 +14,10 @@ pub struct GameState {
     pub seated_players: VecDeque<PlayerId>,
     // 当前牌局的玩家顺序，不包含观战者
     #[serde(skip)]
-    pub(crate) hand_player_order: Vec<PlayerId>,
+    pub hand_player_order: Vec<PlayerId>,
     // 方便通过PlayerId快速查找其在hand_player_order中的索引
     #[serde(skip)]
-    pub(crate) player_indices: HashMap<PlayerId, usize>,
+    pub player_indices: HashMap<PlayerId, usize>,
 
     pub phase: GamePhase,
     pub pot: u32,  // 总奖池金额
@@ -45,6 +45,7 @@ pub struct GameState {
 
     pub small_blind: u32, // 小盲注金额
     pub big_blind: u32, // 大盲注金额
+    pub seats: u8, // 房间总座位数
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,6 +115,7 @@ impl Default for GameState {
             last_raise_amount: 0,
             small_blind: 100,
             big_blind: 200,
+            seats: 10,
         }
     }
 }

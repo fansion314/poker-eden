@@ -1,7 +1,52 @@
 use crate::card::*;
 use crate::message::{ServerMessage, ShowdownResult};
 use crate::state::*;
+use crate::PlayerActionType;
 use std::collections::HashMap;
+
+impl GameState {
+    /// 查找新玩家应该插入到 seated_players 中的索引位置
+    /// 这个算法能够正确处理 VecDeque 经过旋转后的循环有序状态
+    pub fn find_insertion_index(&self, new_player_seat_id: u8) -> usize {
+        // 情况 1: 房间里还没有玩家，直接插入到开头
+        if self.seated_players.is_empty() {
+            return 0;
+        }
+
+        // 获取队列头部的玩家座位ID作为参考点（锚点）
+        // unwrap是安全的，因为我们已经检查过 is_empty
+        let start_sid = self.players.get(&self.seated_players[0]).unwrap().seat_id.unwrap();
+
+        // 使用 position() 查找第一个满足插入条件的索引
+        // 这个闭包的核心逻辑是判断 new_player 是否应该插入到 existing_player 前面
+        let maybe_index = self.seated_players.iter().position(|&existing_id| {
+            let existing_player = self.players.get(&existing_id).unwrap();
+            let existing_sid = existing_player.seat_id.unwrap();
+
+            // 根据新玩家和现有玩家的 seat_id 相对于 start_sid 的位置来决定逻辑
+            match (new_player_seat_id >= start_sid, existing_sid >= start_sid) {
+                // 情况 A: 新玩家和现有玩家都在锚点的“同一侧”
+                // （都在第一部分或都在第二部分）
+                // 此时直接进行数值比较
+                (true, true) | (false, false) => new_player_seat_id < existing_sid,
+
+                // 情况 B: 新玩家在第二部分，现有玩家在第一部分
+                // （例如 start_sid=3, new=1, existing=4)
+                // 逻辑上，第二部分总是在第一部分的后面，所以新玩家应该排在现有玩家 *之前*
+                (false, true) => true,
+
+                // 情况 C: 新玩家在第一部分，现有玩家在第二部分
+                // （例如 start_sid=3, new=4, existing=1)
+                // 逻辑上新玩家排在现有玩家 *之后*，所以我们继续寻找下一个
+                (true, false) => false,
+            }
+        });
+
+        // 情况 2: 如果 position() 找到了索引，就返回它
+        // 情况 3: 如果没找到（返回 None），意味着新玩家在逻辑上是最大的，应该插入到队列末尾
+        maybe_index.unwrap_or(self.seated_players.len())
+    }
+}
 
 // --- 核心游戏流程函数 ---
 impl GameState {
@@ -163,6 +208,7 @@ impl GameState {
         // 增加轮到谁行动的消息
         messages.push(ServerMessage::NextToAct {
             player_id: self.hand_player_order[self.cur_player_idx],
+            valid_actions: vec![PlayerActionType::Call(self.max_bet), PlayerActionType::Fold],
         });
 
         messages
@@ -378,6 +424,11 @@ impl GameState {
                     // 返回 NextToAct 消息
                     return vec![ServerMessage::NextToAct {
                         player_id: self.hand_player_order[self.cur_player_idx],
+                        valid_actions: vec![
+                            PlayerActionType::Call(self.max_bet - self.bets[self.cur_player_idx]),
+                            PlayerActionType::BetOrRaise(self.last_raise_amount),
+                            PlayerActionType::Fold
+                        ],
                     }];
                 }
             }
@@ -513,6 +564,11 @@ impl GameState {
             self.cur_player_idx = potential_actors[0];
             messages.push(ServerMessage::NextToAct {
                 player_id: self.hand_player_order[self.cur_player_idx],
+                valid_actions: vec![
+                    PlayerActionType::Check,
+                    PlayerActionType::BetOrRaise(self.last_raise_amount),
+                    PlayerActionType::Fold,
+                ],
             });
         }
 
@@ -1495,7 +1551,7 @@ mod tests {
             matches!(messages[2], ServerMessage::PlayerActed { player_id, action: PlayerAction::BetOrRaise(200), .. } if player_id == p_bb)
         );
         assert!(
-            matches!(messages[3], ServerMessage::NextToAct { player_id } if player_id == p_dealer)
+            matches!(messages[3], ServerMessage::NextToAct { player_id, .. } if player_id == p_dealer)
         ); // 轮到Dealer行动 (UTG)
         assert_eq!(state.pot, 300);
 
@@ -1505,7 +1561,7 @@ mod tests {
         assert!(
             matches!(messages[0], ServerMessage::PlayerActed { player_id, action: PlayerAction::Fold, .. } if player_id == p_dealer)
         );
-        assert!(matches!(messages[1], ServerMessage::NextToAct { player_id } if player_id == p_sb)); // 轮到SB行动
+        assert!(matches!(messages[1], ServerMessage::NextToAct { player_id, .. } if player_id == p_sb)); // 轮到SB行动
 
         // 3. SB 弃牌
         let messages = state.handle_player_action(p_sb, PlayerAction::Fold);
@@ -1555,7 +1611,7 @@ mod tests {
             matches!(messages[2], ServerMessage::PlayerActed { player_id, new_stack: 0, total_bet_this_round: 150, .. } if player_id == p_bb)
         );
         // 轮到 SB 行动
-        assert!(matches!(messages[3], ServerMessage::NextToAct { player_id } if player_id == p_sb));
+        assert!(matches!(messages[3], ServerMessage::NextToAct { player_id, .. } if player_id == p_sb));
         assert_eq!(state.pot, 250); // 100 + 150
         assert_eq!(state.max_bet, 200); // BB All-in 后，最高下注是150 （但是后续玩家仍应该投注200）
 

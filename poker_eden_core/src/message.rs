@@ -21,7 +21,7 @@ pub enum ClientMessage {
     /// 玩家设置自己的昵称
     SetNickname(String),
     /// 玩家选择一个座位坐下
-    RequestSeat { seat_id: u8 },
+    RequestSeat { seat_id: u8, stack: u32 },
     /// 玩家从座位上站起 (进入观战)
     LeaveSeat,
     /// 玩家请求开始新的一局游戏 (通常由房主或自动触发)
@@ -81,7 +81,7 @@ pub enum ServerMessage {
     /// 轮到下一个玩家行动
     NextToAct {
         player_id: PlayerId,
-        // valid_actions: Vec<PlayerActionType>, // 新增：告诉客户端哪些动作是合法的
+        valid_actions: Vec<PlayerActionType>, // 新增：告诉客户端哪些动作是合法的
     },
 
     /// 发出公共牌 (翻牌、转牌、河牌)
@@ -124,7 +124,12 @@ pub struct ShowdownResult {
 pub enum PlayerActionType {
     Fold,
     Check,
-    Call(u32), // 跟注需要的金额
-    Bet(u32, u32), // 最小/最大下注额
-    Raise(u32, u32), // 最小/最大加注额
+    Call(u32),  // 最小需要跟注的金额
+    BetOrRaise(u32),  // 最小需要加注的金额
+}
+
+impl From<PlayerAction> for ClientMessage {
+    fn from(action: PlayerAction) -> Self {
+        ClientMessage::PerformAction(action)
+    }
 }

@@ -18,7 +18,7 @@ use tracing::{debug, info};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
-use poker_eden_core::{ClientMessage, GameState, Player, PlayerId, PlayerSecret, PlayerState, RoomId, ServerMessage};
+use poker_eden_core::{ClientMessage, GamePhase, GameState, Player, PlayerId, PlayerSecret, PlayerState, RoomId, ServerMessage};
 
 // 服务器全局状态，使用 Arc<Mutex<...>> 实现线程安全共享
 struct AppState {
@@ -250,6 +250,27 @@ async fn handle_client_message(
                                 vec![ServerMessage::Error { message: "只有房主可以开始游戏".to_string() }]
                             } else {
                                 room.game_state.start_new_hand()
+                            }
+                        }
+                        ClientMessage::RequestSeat { seat_id, stack } => {
+                            if room.game_state.phase == GamePhase::WaitingForPlayers
+                                && !room.game_state.players.values().any(|p| p.seat_id == Some(seat_id))
+                                && seat_id < room.game_state.seats
+                            {
+                                let p = {
+                                    let p = room.game_state.players.get_mut(&player_id).unwrap();
+                                    p.stack = stack;
+                                    p.seat_id = Some(seat_id);
+                                    p.state = PlayerState::Waiting;
+                                    p.clone()
+                                };
+
+                                let sid = room.game_state.find_insertion_index(seat_id);
+                                room.game_state.seated_players.insert(sid, p.id);
+
+                                vec![ServerMessage::PlayerUpdated { player: p }]
+                            } else {
+                                vec![ServerMessage::Error { message: "当前游戏阶段不允许请求座位/该座位已被坐".to_string() }]
                             }
                         }
                         ClientMessage::PerformAction(action) => {
