@@ -11,8 +11,10 @@ use axum::{
     routing::get,
     Router,
 };
+use dashmap::DashMap;
 use futures_util::{stream::StreamExt, SinkExt};
-use tokio::sync::{mpsc, Mutex};
+use parking_lot::{Mutex as P_Mutex, RwLock as P_RwLock};
+use tokio::sync::{mpsc, RwLock};
 use tracing::info;
 use uuid::Uuid;
 
@@ -20,15 +22,17 @@ use poker_eden_core::{ClientMessage, GameState, Player, PlayerId, PlayerSecret, 
 
 // 服务器全局状态，使用 Arc<Mutex<...>> 实现线程安全共享
 struct AppState {
-    rooms: HashMap<RoomId, Room>,
+    rooms: DashMap<RoomId, Arc<Room>>,
 }
 
 // 单个房间的状态
+// 重要‼️：严格规定使用锁的顺序，避免死锁：
+// players -> host_id -> game_state
 struct Room {
-    game_state: GameState,
-    host_id: PlayerId,
+    game_state: P_Mutex<GameState>,
+    host_id: P_RwLock<PlayerId>,
     // 将 PlayerId 映射到具体的网络连接
-    players: HashMap<PlayerId, PlayerConnection>,
+    players: RwLock<HashMap<PlayerId, PlayerConnection>>,
 }
 
 // 玩家的网络连接信息
@@ -38,15 +42,15 @@ struct PlayerConnection {
     sender: mpsc::Sender<ServerMessage>,
 }
 
-type SharedState = Arc<Mutex<AppState>>;
+type SharedState = Arc<AppState>;
 
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
 
-    let state = SharedState::new(Mutex::new(AppState {
-        rooms: HashMap::new(),
-    }));
+    let state = SharedState::new(AppState {
+        rooms: DashMap::new(),
+    });
 
     let app = Router::new()
         .route("/ws", get(websocket_handler))
@@ -148,22 +152,19 @@ async fn handle_client_message(
             let gs_for_client = game_state.for_client(&player_id);
 
             let mut room = Room {
-                game_state,
-                host_id: player_id,
-                players: HashMap::new(),
+                game_state: P_Mutex::new(game_state),
+                host_id: P_RwLock::new(player_id),
+                players: RwLock::new(HashMap::new()),
             };
-            room.players.insert(player_id, PlayerConnection {
+            room.players.get_mut().insert(player_id, PlayerConnection {
                 secret: player_secret,
                 sender: tx.clone(),
             });
 
-            {
-                let mut app_state = state.lock().await;
-                app_state.rooms.insert(room_id, room);
-            }
-            *context = Some((room_id, player_id));
-            info!("玩家 {} 创建了新房间 {}", player_id, room_id);
+            state.rooms.insert(room_id, Arc::new(room));
 
+            info!("玩家 {} 创建了新房间 {}", player_id, room_id);
+            *context = Some((room_id, player_id));
             let _ = tx.send(ServerMessage::RoomJoined {
                 your_id: player_id,
                 your_secret: player_secret,
@@ -176,40 +177,50 @@ async fn handle_client_message(
                 return;
             }
 
+            let room = match state.rooms.get(&room_id) {
+                Some(r) => r.clone(),
+                None => {
+                    let _ = tx.send(ServerMessage::Error { message: "房间不存在".to_string() }).await;
+                    return;
+                }
+            };
+
             let player_id = Uuid::new_v4();
             let player_secret = Uuid::new_v4();
             let gs_for_client;
 
-            if let Some(room) = state.lock().await.rooms.get_mut(&room_id) {
-                let player = Player {
-                    id: player_id,
-                    nickname,
-                    stack: 0,
-                    wins: 0,
-                    losses: 0,
-                    state: PlayerState::SittingOut,
-                    seat_id: None,
-                };
-                room.game_state.players.insert(player_id, player.clone());
-                room.players.insert(player_id, PlayerConnection {
+            let player = Player {
+                id: player_id,
+                nickname,
+                stack: 0,
+                wins: 0,
+                losses: 0,
+                state: PlayerState::SittingOut,
+                seat_id: None,
+            };
+
+            {  // r_players write lock
+                let mut r_players = room.players.write().await;
+
+                {  // r_game_state lock
+                    let mut game_state = room.game_state.lock();
+                    game_state.players.insert(player_id, player.clone());
+                    gs_for_client = game_state.for_client(&player_id);
+                }
+
+                r_players.insert(player_id, PlayerConnection {
                     secret: player_secret,
                     sender: tx.clone(),
                 });
-
-                *context = Some((room_id, player_id));
-
-                info!("玩家 {} 加入了房间 {}", player_id, room_id);
-                // 广播给房间内其他玩家
-                let join_msg = ServerMessage::PlayerJoined { player: player.clone() };
-                broadcast(&room.players, &join_msg, Some(player_id)).await;
-
-                // 私密地发送给新玩家
-                gs_for_client = room.game_state.for_client(&player_id);
-            } else {
-                let _ = tx.send(ServerMessage::Error { message: "房间不存在".to_string() }).await;
-                return;
             }
 
+            info!("玩家 {} 加入了房间 {}", player_id, room_id);
+            *context = Some((room_id, player_id));
+            {  // r_players read lock
+                // 广播给房间内其他玩家
+                let join_msg = ServerMessage::PlayerJoined { player: player.clone() };
+                broadcast(room.players.read().await.iter(), &join_msg, Some(player_id)).await;
+            }
             let _ = tx.send(ServerMessage::RoomJoined {
                 your_id: player_id,
                 your_secret: player_secret,
@@ -219,41 +230,46 @@ async fn handle_client_message(
         // ... 其他需要认证后才能执行的消息
         _ => {
             if let Some((room_id, player_id)) = context {
-                let mut app_state = state.lock().await;
-                if let Some(room) = app_state.rooms.get_mut(room_id) {
-                    // 游戏逻辑处理
-                    let messages = match msg {
-                        ClientMessage::StartHand => {
-                            if *player_id != room.host_id {
-                                vec![ServerMessage::Error { message: "只有房主可以开始游戏".to_string() }]
-                            } else {
-                                room.game_state.start_new_hand()
-                            }
+                let room = match state.rooms.get(room_id) {
+                    None => {
+                        let _ = tx.send(ServerMessage::Error { message: "房间不存在".to_string() }).await;
+                        return;
+                    }
+                    Some(r) => r.clone(),
+                };
+                // 游戏逻辑处理
+                let messages = match msg {
+                    ClientMessage::StartHand => {
+                        let host_id = *room.host_id.read();
+                        if *player_id != host_id {
+                            vec![ServerMessage::Error { message: "只有房主可以开始游戏".to_string() }]
+                        } else {
+                            room.game_state.lock().start_new_hand()
                         }
-                        ClientMessage::PerformAction(action) => {
-                            room.game_state.handle_player_action(*player_id, action)
-                        }
-                        // TODO: 实现其他 ClientMessage 的处理
-                        _ => vec![ServerMessage::Error { message: "该功能暂未实现".to_string() }]
-                    };
+                    }
+                    ClientMessage::PerformAction(action) => {
+                        room.game_state.lock().handle_player_action(*player_id, action)
+                    }
+                    // TODO: 实现其他 ClientMessage 的处理
+                    _ => vec![ServerMessage::Error { message: "该功能暂未实现".to_string() }]
+                };
 
-                    // 广播消息
-                    for msg in messages {
-                        match &msg {
-                            ServerMessage::Error { .. } => {
-                                // 错误消息只发给当前玩家
-                                let _ = tx.send(msg).await;
+                // 广播消息
+                for msg in messages {
+                    match &msg {
+                        ServerMessage::Error { .. } => {
+                            // 错误消息只发给当前玩家
+                            let _ = tx.send(msg).await;
+                        }
+                        ServerMessage::GameStateSnapshot(gs) => {
+                            // 快照需要为每个玩家单独生成
+                            for (pid, conn) in room.players.read().await.iter() {
+                                let personalized_gs = gs.for_client(pid);
+                                let _ = conn.sender.send(ServerMessage::GameStateSnapshot(personalized_gs)).await;
                             }
-                            ServerMessage::GameStateSnapshot(gs) => {
-                                // 快照需要为每个玩家单独生成
-                                for (pid, conn) in &room.players {
-                                    let personalized_gs = gs.for_client(pid);
-                                    let _ = conn.sender.send(ServerMessage::GameStateSnapshot(personalized_gs)).await;
-                                }
-                            }
-                            _ => {
-                                broadcast(&room.players, &msg, None).await;
-                            }
+                        }
+                        _ => {
+                            broadcast(room.players.read().await.iter(), &msg, None).await;
                         }
                     }
                 }
@@ -268,50 +284,62 @@ async fn handle_client_message(
 /// 玩家断开连接后的处理
 async fn handle_disconnect(state: SharedState, room_id: RoomId, player_id: PlayerId) {
     info!("玩家 {} 从房间 {} 断开连接", player_id, room_id);
-    let mut app_state = state.lock().await;
+    let room = match state.rooms.get(&room_id) {
+        None => return,
+        Some(r) => r.clone(),
+    };
 
-    let mut room_is_empty = false;
-    if let Some(room) = app_state.rooms.get_mut(&room_id) {
+    {  // r_players write lock
+        let mut r_players = room.players.write().await;
         // 从连接映射中移除
-        room.players.remove(&player_id);
+        r_players.remove(&player_id);
 
         // 更新游戏状态中的玩家为 Offline
-        if let Some(player) = room.game_state.players.get_mut(&player_id) {
-            player.state = PlayerState::Offline;
-            let update_msg = ServerMessage::PlayerUpdated { player: player.clone() };
-            broadcast(&room.players, &update_msg, None).await;
+        let mut update_msg = None;
+        {  // r_game_state lock
+            let mut game_state = room.game_state.lock();
+            if let Some(p) = game_state.players.get_mut(&player_id) {
+                p.state = PlayerState::Offline;
+                update_msg = Some(ServerMessage::PlayerUpdated { player: p.clone() });
+            }
         }
+        if let Some(msg) = update_msg {
+            broadcast(r_players.iter(), &msg, None).await;
+        }
+    }
+
+    {  // r_players read lock
+        let r_players = room.players.read().await;
 
         // 如果房主断开，转移房主权限
-        if room.host_id == player_id {
-            if let Some(new_host_id) = room.players.keys().next().cloned() {
-                room.host_id = new_host_id;
+        let host_id = *room.host_id.read();
+        if player_id == host_id {
+            if let Some(new_host_id) = r_players.keys().next().cloned() {
+                *room.host_id.write() = new_host_id;
                 let info_msg = ServerMessage::Info {
                     message: format!(
                         "房主已断开，新房主是 {}",
-                        room.game_state.players.get(&new_host_id).map_or("未知玩家", |p| &p.nickname)
+                        room.game_state.lock().players.get(&new_host_id)
+                            .map_or("未知玩家", |p| &p.nickname)
                     ),
                 };
-                broadcast(&room.players, &info_msg, None).await;
+                broadcast(r_players.iter(), &info_msg, None).await;
                 info!("房间 {} 的房主已转移给 {}", room_id, new_host_id);
             }
         }
 
-        if room.players.is_empty() {
-            room_is_empty = true;
+        // 判断是否清空房间
+        if r_players.is_empty() {
+            state.rooms.remove(&room_id);
+            info!("房间 {} 已空，已被移除", room_id);
         }
-    }
-
-    if room_is_empty {
-        app_state.rooms.remove(&room_id);
-        info!("房间 {} 已空，已被移除", room_id);
     }
 }
 
 
 /// 向房间内所有玩家广播消息
 async fn broadcast(
-    players: &HashMap<PlayerId, PlayerConnection>,
+    players: impl Iterator<Item=(&PlayerId, &PlayerConnection)>,
     message: &ServerMessage,
     exclude: Option<PlayerId>,
 ) {

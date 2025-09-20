@@ -13,3 +13,5 @@ uuid = { workspace = true }
 futures-util = { version = "0.3", features = ["sink"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dashmap = "6.1"
+parking_lot = "0.12"
