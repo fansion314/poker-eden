@@ -28,6 +28,8 @@ pub enum ClientMessage {
     StartHand,
     /// 玩家在轮到自己时执行的游戏动作
     PerformAction(PlayerAction),
+    /// 获取自己的手牌
+    GetMyHand,
 }
 
 // --- 服务器 -> 客户端 的消息 ---
@@ -41,6 +43,7 @@ pub enum ServerMessage {
         your_id: PlayerId,
         your_secret: PlayerSecret, // 用于断线重连的凭证
         game_state: GameState, // 净化后的初始游戏状态
+        host_id: PlayerId, // 房主ID
     },
 
     // --- 游戏状态更新消息 ---
@@ -102,6 +105,11 @@ pub enum ServerMessage {
         results: Vec<ShowdownResult>,
     },
 
+    /// 玩家的手牌
+    PlayerHand {
+        hands: (Card, Card),
+    },
+
     /// 服务器向特定客户端发送错误信息
     Info { message: String },
     Error { message: String },
@@ -124,8 +132,9 @@ pub struct ShowdownResult {
 pub enum PlayerActionType {
     Fold,
     Check,
-    Call(u32),  // 最小需要跟注的金额
-    BetOrRaise(u32),  // 最小需要加注的金额
+    Call(u32),   // 需要跟注的金额
+    Bet(u32),    // 最小需要下注的金额
+    Raise(u32),  // 最小需要加注的金额
 }
 
 impl From<PlayerAction> for ClientMessage {

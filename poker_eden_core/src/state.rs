@@ -1,6 +1,7 @@
 use crate::card::Card;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
+use std::fmt::Display;
 use uuid::Uuid;
 
 pub type RoomId = Uuid;
@@ -40,7 +41,7 @@ pub struct GameState {
     pub(crate) player_has_acted: Vec<bool>,
 
     pub cur_player_idx: usize,  // 当前应该行动的玩家在 hand_player_order 中的索引
-    pub max_bet: u32, // 当前轮下注的最高金额
+    pub max_bet: u32, // 下注的最高金额
     pub last_raise_amount: u32,  // 最小加注额
 
     pub small_blind: u32, // 小盲注金额
@@ -69,6 +70,19 @@ pub enum GamePhase {
     Showdown, // 一局结束，结算完成
 }
 
+impl Display for GamePhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GamePhase::WaitingForPlayers => write!(f, "等待玩家"),
+            GamePhase::PreFlop => write!(f, "预发牌"),
+            GamePhase::Flop => write!(f, "发牌"),
+            GamePhase::Turn => write!(f, "转牌"),
+            GamePhase::River => write!(f, "河牌"),
+            GamePhase::Showdown => write!(f, "摊牌"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PlayerAction {
     Check,     // 过牌
@@ -93,6 +107,19 @@ pub enum PlayerState {
     Offline,
 }
 
+impl Display for PlayerState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PlayerState::Waiting => write!(f, "等待"),
+            PlayerState::Playing => write!(f, "游戏中"),
+            PlayerState::AllIn => write!(f, "已全下"),
+            PlayerState::Folded => write!(f, "已弃牌"),
+            PlayerState::SittingOut => write!(f, "离席"),
+            PlayerState::Offline => write!(f, "掉线"),
+        }
+    }
+}
+
 // --- GameState 的实现方法 ---
 
 impl Default for GameState {
@@ -105,9 +132,9 @@ impl Default for GameState {
             player_indices: HashMap::new(),
             phase: GamePhase::WaitingForPlayers,
             pot: 0,
-            community_cards: vec![],
+            community_cards: vec![None; 5],
             deck: vec![],
-            player_cards: vec![],
+            player_cards: vec![(None, None); 5],
             bets: vec![],
             player_has_acted: vec![],
             cur_player_idx: 0,

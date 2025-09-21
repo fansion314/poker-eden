@@ -11,7 +11,7 @@ futures-util = { version = "0.3", features = ["sink"] }
 serde_json = { workspace = true }
 tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
 url = "2.5"
-rand = { workspace = true }
 crossterm = "0.29"
 tui = "0.19"
 uuid = { workspace = true }
+rand = { workspace = true }

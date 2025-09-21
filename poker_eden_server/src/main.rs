@@ -171,6 +171,7 @@ async fn handle_client_message(
                 your_id: player_id,
                 your_secret: player_secret,
                 game_state: gs_for_client,
+                host_id: player_id,
             }).await;
             info!("玩家 {} 创建了新房间 {}", player_id, room_id);
         }
@@ -221,6 +222,7 @@ async fn handle_client_message(
                     your_id: player_id,
                     your_secret: player_secret,
                     game_state: gs_for_client,
+                    host_id: room.host_id,
                 };
             }
 
@@ -232,7 +234,8 @@ async fn handle_client_message(
         _ => {
             if let Some((room_id, player_id)) = context {
                 let targets;
-                let messages = {
+                let mut only_messages = vec![];
+                let broadcast_messages = {
                     let mut room = match state.rooms.get_mut(&room_id) {
                         Some(r) => r,
                         None => {
@@ -249,11 +252,12 @@ async fn handle_client_message(
                             if *player_id != room.host_id {
                                 vec![ServerMessage::Error { message: "只有房主可以开始游戏".to_string() }]
                             } else {
+                                room.game_state.seated_players.rotate_left(1);
                                 room.game_state.start_new_hand()
                             }
                         }
                         ClientMessage::RequestSeat { seat_id, stack } => {
-                            if room.game_state.phase == GamePhase::WaitingForPlayers
+                            if (room.game_state.phase == GamePhase::WaitingForPlayers || room.game_state.phase == GamePhase::Showdown)
                                 && !room.game_state.players.values().any(|p| p.seat_id == Some(seat_id))
                                 && seat_id < room.game_state.seats
                             {
@@ -270,19 +274,30 @@ async fn handle_client_message(
 
                                 vec![ServerMessage::PlayerUpdated { player: p }]
                             } else {
-                                vec![ServerMessage::Error { message: "当前游戏阶段不允许请求座位/该座位已被坐".to_string() }]
+                                vec![ServerMessage::Error { message: "入座失败".to_string() }]
                             }
                         }
                         ClientMessage::PerformAction(action) => {
                             room.game_state.handle_player_action(*player_id, action)
                         }
-                        // TODO: 实现其他 ClientMessage 的处理
+                        ClientMessage::GetMyHand => {
+                            if room.game_state.phase == GamePhase::PreFlop {
+                                let p_idx = room.game_state.player_indices.get(&player_id);
+                                if let Some(idx) = p_idx {
+                                    let hands = room.game_state.player_cards[*idx];
+                                    only_messages.push(ServerMessage::PlayerHand {
+                                        hands: (hands.0.unwrap(), hands.1.unwrap()),
+                                    });
+                                }
+                            }
+                            vec![]
+                        }
                         _ => vec![ServerMessage::Error { message: "该功能暂未实现".to_string() }]
                     }
                 };
 
                 // 广播消息
-                for msg in messages {
+                for msg in broadcast_messages {
                     match &msg {
                         ServerMessage::Error { .. } => {
                             // 错误消息只发给当前玩家
@@ -292,6 +307,10 @@ async fn handle_client_message(
                             broadcast(&targets, &msg, None).await;
                         }
                     }
+                }
+                // 发送仅发给当前玩家的消息
+                for msg in only_messages {
+                    let _ = tx.send(msg).await;
                 }
             } else {
                 let _ = tx.send(ServerMessage::Error { message: "请先加入或创建房间".to_string() }).await;

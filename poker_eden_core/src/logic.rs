@@ -208,7 +208,11 @@ impl GameState {
         // 增加轮到谁行动的消息
         messages.push(ServerMessage::NextToAct {
             player_id: self.hand_player_order[self.cur_player_idx],
-            valid_actions: vec![PlayerActionType::Call(self.max_bet), PlayerActionType::Fold],
+            valid_actions: vec![
+                PlayerActionType::Call(self.max_bet - self.bets[self.cur_player_idx]),
+                PlayerActionType::Raise(self.last_raise_amount),
+                PlayerActionType::Fold
+            ],
         });
 
         messages
@@ -275,6 +279,9 @@ impl GameState {
     ) -> Vec<ServerMessage> {
         let mut messages = Vec::new();
         if self.current_player_id() != Some(player_id) {
+            messages.push(ServerMessage::Error {
+                message: "当前不该你行动".to_string(),
+            });
             return messages;
         }
 
@@ -291,6 +298,9 @@ impl GameState {
                 PlayerAction::Check => {
                     // 必须是无人下注（或大盲注无人加注）时才能过牌
                     if amount_to_call != 0 {
+                        messages.push(ServerMessage::Error {
+                            message: format!("当前有人下注 {}，你至少要下注和他相等", amount_to_call),
+                        });
                         return messages;
                     }
                 }
@@ -310,14 +320,20 @@ impl GameState {
 
                     // 基本条件: 增加的额度 > 0，且小于等于自己的总筹码
                     if raise_amount == 0 || raise_amount > player.stack {
+                        messages.push(ServerMessage::Error {
+                            message: format!("你只能下注你剩余的筹码 {} 或更少", player.stack),
+                        });
                         return messages;
                     }
 
                     let new_total_bet = player_total_bet + raise_amount;
 
                     // 如果是翻牌后的第一轮下注 (Bet)，下注额必须大于等于大盲注 (除非是All-in)
-                    if self.max_bet == 0 {
+                    if self.max_bet == player_total_bet {
                         if raise_amount < self.big_blind && player.stack > raise_amount {
+                            messages.push(ServerMessage::Error {
+                                message: format!("你只能下注大盲注 {} 或更多", self.big_blind),
+                            });
                             return messages;
                         }
                     }
@@ -325,6 +341,9 @@ impl GameState {
                     else {
                         // 新的总下注额必须大于当前最高下注额
                         if new_total_bet <= self.max_bet {
+                            messages.push(ServerMessage::Error {
+                                message: format!("你只能加注 {} 或更多", amount_to_call + self.last_raise_amount),
+                            });
                             return messages;
                         }
 
@@ -332,6 +351,9 @@ impl GameState {
                         let raise_diff = new_total_bet - self.max_bet;
                         // 加注的差额必须大于等于上一个加注的差额 (All-in除外)
                         if raise_diff < self.last_raise_amount && player.stack > raise_amount {
+                            messages.push(ServerMessage::Error {
+                                message: format!("你只能加注 {} 或更多", amount_to_call + self.last_raise_amount),
+                            });
                             return messages;
                         }
                     }
@@ -421,12 +443,14 @@ impl GameState {
                 if player.state == PlayerState::Playing && !self.player_has_acted[current_idx] {
                     // 找到后...
                     self.cur_player_idx = current_idx;
+                    let need_call_amount = self.max_bet - self.bets[current_idx];
+                    let need_raise_amount = need_call_amount + self.last_raise_amount;
                     // 返回 NextToAct 消息
                     return vec![ServerMessage::NextToAct {
-                        player_id: self.hand_player_order[self.cur_player_idx],
+                        player_id: self.hand_player_order[current_idx],
                         valid_actions: vec![
-                            PlayerActionType::Call(self.max_bet - self.bets[self.cur_player_idx]),
-                            PlayerActionType::BetOrRaise(self.last_raise_amount),
+                            if need_call_amount > 0 { PlayerActionType::Call(need_call_amount) } else { PlayerActionType::Check },
+                            if need_call_amount > 0 { PlayerActionType::Raise(need_raise_amount) } else { PlayerActionType::Bet(need_raise_amount) },
                             PlayerActionType::Fold
                         ],
                     }];
@@ -440,7 +464,7 @@ impl GameState {
     ///
     /// 下注轮结束的条件是:
     /// 1. 所有未弃牌 (Folded) 且未全下 (All-In) 的玩家，都已经在这一轮行动过 (player_has_acted == true)。
-    /// 2. 并且，他们所有人的当前下注额 (cur_bets) 都等于当前轮的最高下注额 (cur_max_bet)。
+    /// 2. 并且，他们所有人的当前下注额 (cur_bets) 都等于当前轮的最高下注额 (max_bet)。
     ///
     /// 这个逻辑正确地处理了:
     /// - 翻牌前大盲注的 "选择权" (Option): 如果前面玩家只是跟注，行动轮到大盲时，他的 `player_has_acted` 仍为 false，所以本轮不会结束，他可以选择过牌或加注。
@@ -566,7 +590,7 @@ impl GameState {
                 player_id: self.hand_player_order[self.cur_player_idx],
                 valid_actions: vec![
                     PlayerActionType::Check,
-                    PlayerActionType::BetOrRaise(self.last_raise_amount),
+                    PlayerActionType::Bet(self.last_raise_amount),
                     PlayerActionType::Fold,
                 ],
             });
@@ -758,6 +782,14 @@ impl GameState {
         for winner_id in total_winnings.keys() {
             if let Some(player) = self.players.get_mut(winner_id) {
                 player.wins += 1;
+            }
+        }
+        for player_id in self.hand_player_order.iter() {
+            if let Some(player) = self.players.get_mut(player_id) {
+                if player.stack == 0 {
+                    player.losses += 1;
+                    player.state = PlayerState::Offline;
+                }
             }
         }
 

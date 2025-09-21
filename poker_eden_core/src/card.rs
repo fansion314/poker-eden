@@ -69,10 +69,10 @@ pub enum HandRank {
 impl fmt::Display for Suit {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}", match self {
-            Suit::Spade => "♠",
-            Suit::Heart => "♥",
-            Suit::Club => "♣",
-            Suit::Diamond => "♦",
+            Suit::Spade => "♠️",
+            Suit::Heart => "♥️",
+            Suit::Club => "♣️",
+            Suit::Diamond => "♦️",
         })
     }
 }
@@ -100,6 +100,23 @@ impl fmt::Display for Rank {
 impl fmt::Display for Card {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}{}", self.suit, self.rank)
+    }
+}
+
+impl fmt::Display for HandRank {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", match self {
+            HandRank::HighCard(..) => "高牌".to_string(),
+            HandRank::OnePair(r1, ..) => format!("一对({})", r1),
+            HandRank::TwoPair(r1, r2, ..) => format!("两对({},{})", r1, r2),
+            HandRank::ThreeOfAKind(r1, ..) => format!("三条({})", r1),
+            HandRank::Straight(..) => "顺子".to_string(),
+            HandRank::Flush(..) => "同花".to_string(),
+            HandRank::FullHouse(..) => "葫芦".to_string(),
+            HandRank::FourOfAKind(..) => "四条".to_string(),
+            HandRank::StraightFlush(..) => "同花顺".to_string(),
+            HandRank::RoyalFlush => "皇家同花顺".to_string(),
+        })
     }
 }
 
