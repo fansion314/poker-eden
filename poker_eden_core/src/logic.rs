@@ -73,7 +73,7 @@ impl GameState {
         let mut sitting_out_indices = vec![];
         for (i, player_id) in self.seated_players.iter().enumerate() {
             if let Some(p) = self.players.get_mut(player_id) {
-                if p.state == PlayerState::Offline || p.stack == 0 {
+                if p.is_offline || p.stack == 0 {
                     p.state = PlayerState::SittingOut;
                     sitting_out_indices.push(i);
                 }
@@ -243,7 +243,7 @@ impl GameState {
         let is_auto_action = self
             .players
             .get(&player_id)
-            .map_or(false, |p| p.state == PlayerState::Offline);
+            .map_or(false, |p| p.is_offline);
 
         if is_auto_action {
             let player_idx = *self.player_indices.get(&player_id).unwrap();
@@ -256,7 +256,6 @@ impl GameState {
 
             // 调用 handle_player_action 并捕获其返回的消息
             let messages = self.handle_player_action(player_id, action);
-            self.players.get_mut(&player_id).unwrap().state = PlayerState::Offline;
             (true, messages)
         } else {
             (false, vec![])
@@ -445,7 +444,7 @@ impl GameState {
             current_idx = (current_idx + 1) % self.hand_player_order.len();
             let next_player_id = self.hand_player_order[current_idx];
             if let Some(player) = self.players.get(&next_player_id) {
-                if (player.state == PlayerState::Playing || player.state == PlayerState::Offline) && !self.player_has_acted[current_idx] {
+                if (player.state == PlayerState::Playing) && !self.player_has_acted[current_idx] {
                     // 找到后...
                     self.cur_player_idx = current_idx;
                     let need_call_amount = self.max_bet - self.bets[current_idx];
@@ -797,7 +796,7 @@ impl GameState {
             if let Some(player) = self.players.get_mut(player_id) {
                 if player.stack == 0 {
                     player.losses += 1;
-                    player.state = PlayerState::Offline;
+                    player.is_offline = true;
                 }
             }
         }
@@ -906,6 +905,7 @@ mod tests {
                 losses: 0,
                 state: PlayerState::Waiting,
                 seat_id: None,
+                is_offline: false,
             };
             players.insert(player_id, player);
             seated_players.push_back(player_id);
@@ -1552,7 +1552,7 @@ mod tests {
         assert_eq!(state.current_player_id(), Some(p0_id));
 
         // 将p0设置为离线
-        state.players.get_mut(&p0_id).unwrap().state = PlayerState::Offline;
+        state.players.get_mut(&p0_id).unwrap().is_offline = true;
 
         // 调用tick。因为p0需要跟大盲注20，所以他应该自动弃牌。
         // tick()执行了自动操作，所以返回true
@@ -1561,7 +1561,7 @@ mod tests {
         // 验证p0已弃牌
         assert_eq!(
             state.players.get(&p0_id).unwrap().state,
-            PlayerState::Offline
+            PlayerState::Folded
         );
 
         // 验证行动权成功转移给了p1

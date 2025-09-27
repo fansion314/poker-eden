@@ -155,7 +155,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     }
                     KeyCode::Char(c) => app_guard.input.push(c),
                     KeyCode::Backspace => { app_guard.input.pop(); }
-                    KeyCode::Tab => app_guard.show_log = !app_guard.show_log,
+                    KeyCode::Tab => {
+                        app_guard.show_log = !app_guard.show_log;
+                        app_guard.should_refresh = true;
+                    }
                     KeyCode::Esc => break,
                     _ => {}
                 }
@@ -246,7 +249,7 @@ fn handle_server_message(app: &mut App, msg: ServerMessage) -> Vec<ClientMessage
         }
         ServerMessage::PlayerLeft { player_id } => {
             if let Some(gs) = &mut app.game_state {
-                gs.players.get_mut(&player_id).unwrap().state = PlayerState::Offline;
+                gs.players.get_mut(&player_id).unwrap().is_offline = true;
             }
         }
         ServerMessage::PlayerUpdated { player } => {
@@ -294,7 +297,7 @@ fn handle_server_message(app: &mut App, msg: ServerMessage) -> Vec<ClientMessage
                 }
                 for player_id in gs.seated_players.iter() {
                     if let Some(p) = gs.players.get_mut(player_id) {
-                        if p.state == PlayerState::Offline || p.stack == 0 {
+                        if p.is_offline || p.stack == 0 {
                             p.state = PlayerState::SittingOut;
                         }
                     }
@@ -382,7 +385,7 @@ fn handle_server_message(app: &mut App, msg: ServerMessage) -> Vec<ClientMessage
                     if let Some(p) = gs.players.get_mut(p) {
                         if p.stack == 0 {
                             p.losses += 1;
-                            p.state = PlayerState::Offline;
+                            p.is_offline = true;
                         };
                     }
                 }
@@ -443,7 +446,7 @@ fn parse_in_room_input(input: &str, app: &App) -> Option<ClientMessage> {
     }
 
     let is_lose_game = app.game_state.as_ref().map_or(false, |gs| {
-        gs.players.get(&app.my_id.unwrap()).map_or(false, |p| p.state == PlayerState::Offline)
+        gs.players.get(&app.my_id.unwrap()).map_or(false, |p| p.is_offline)
     });
 
     if !is_seated || is_lose_game {
@@ -678,6 +681,7 @@ fn draw_players_table<B: Backend>(f: &mut Frame<B>, app: &App, area: Rect) {
         });
         let status_str = if is_thinking { "思考中...".to_string() } else { format!("{}", player.state) };
         let mut name = "".to_string();
+        if player.is_offline { name.push_str("!离线! "); }
         if is_me { name.push_str("[你]"); }
         name.push_str(player.nickname.as_str());
         if is_dealer { name.push_str(" (D)"); }
@@ -710,7 +714,7 @@ fn draw_actions_and_input<B: Backend>(f: &mut Frame<B>, app: &App, actions_area:
     });
 
     let is_lose_game = app.game_state.as_ref().map_or(false, |gs| {
-        gs.players.get(&app.my_id.unwrap()).map_or(false, |p| p.state == PlayerState::Offline)
+        gs.players.get(&app.my_id.unwrap()).map_or(false, |p| p.is_offline)
     });
 
     let game_phase = app.game_state.as_ref().map(|gs| gs.phase);

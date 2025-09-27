@@ -61,6 +61,7 @@ pub struct Player {
     pub losses: u32,  // 本次游戏输光全部筹码的次数
     pub state: PlayerState,
     pub seat_id: Option<u8>,  // 座位号（总共若干座位）由用户自己选择座位
+    pub is_offline: bool,  // 是否离线
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -106,8 +107,6 @@ pub enum PlayerState {
     Folded,
     /// 离席 (Sitting Out): 离席，不参与游戏，但是可以观看游戏进行。
     SittingOut,
-    /// 离线或离开
-    Offline,
 }
 
 impl Display for PlayerState {
@@ -118,7 +117,6 @@ impl Display for PlayerState {
             PlayerState::AllIn => write!(f, "已全下"),
             PlayerState::Folded => write!(f, "已弃牌"),
             PlayerState::SittingOut => write!(f, "离席"),
-            PlayerState::Offline => write!(f, "掉线"),
         }
     }
 }

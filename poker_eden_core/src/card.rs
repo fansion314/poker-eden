@@ -145,7 +145,9 @@ pub fn generate_random_hand(k_players: usize) -> Vec<Card> {
 
     let mut deck = create_deck();
     let mut rng = rand::rng();
-    deck.shuffle(&mut rng);
+    for _ in 0..3 {
+        deck.shuffle(&mut rng);
+    }
 
     let total_cards = 2 * k_players + 5;
     let mut cards = vec![Card { rank: Rank::Ace, suit: Suit::Heart }; total_cards];

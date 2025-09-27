@@ -149,6 +149,7 @@ async fn handle_client_message(
                 losses: 0,
                 state: PlayerState::SittingOut,
                 seat_id: None,
+                is_offline: false,
             };
             game_state.players.insert(player_id, player.clone());
             let gs_for_client = game_state.for_client(&player_id);
@@ -206,6 +207,7 @@ async fn handle_client_message(
                     losses: 0,
                     state: PlayerState::SittingOut,
                     seat_id: None,
+                    is_offline: false,
                 };
 
                 room.game_state.players.insert(player_id, player.clone());
@@ -348,7 +350,7 @@ async fn handle_disconnect(state: SharedState, room_id: RoomId, player_id: Playe
 
         // 更新游戏状态中的玩家为 Offline
         if let Some(p) = room.game_state.players.get_mut(&player_id) {
-            p.state = PlayerState::Offline;
+            p.is_offline = true;
             update_state_msg = Some(ServerMessage::PlayerUpdated { player: p.clone() });
         }
 
