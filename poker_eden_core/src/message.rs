@@ -2,6 +2,7 @@ use crate::card::{Card, HandRank};
 use crate::state::{GamePhase, GameState, Player, PlayerAction, PlayerId};
 use crate::RoomId;
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use uuid::Uuid;
 
 pub type PlayerSecret = Uuid;
@@ -11,12 +12,16 @@ pub type PlayerSecret = Uuid;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum ClientMessage {
+    // ！房间加入时
     // --- 房间管理消息 ---
+    // 房主
     /// 客户端请求创建一个新房间
     CreateRoom { nickname: String },
+    // 玩家
     /// 客户端请求加入一个已存在的房间
     JoinRoom { room_id: RoomId, nickname: String },
 
+    // ！游戏设置和游戏中消息
     // --- 游戏内消息 ---
     /// 玩家设置自己的昵称
     SetNickname(String),
@@ -24,12 +29,20 @@ pub enum ClientMessage {
     RequestSeat { seat_id: u8, stack: u32 },
     /// 玩家从座位上站起 (进入观战)
     LeaveSeat,
-    /// 玩家请求开始新的一局游戏 (通常由房主或自动触发)
-    StartHand,
     /// 玩家在轮到自己时执行的游戏动作
     PerformAction(PlayerAction),
     /// 获取自己的手牌
     GetMyHand,
+
+    // 房主
+    /// 玩家请求开始新的一局游戏 (通常由房主或自动触发)
+    StartHand,
+    /// 房主设置游戏参数 (例如：小盲、大盲、座位数等)
+    SetGameSettings {
+        small_blind: u32,
+        big_blind: u32,
+        seats: u8,
+    },
 }
 
 // --- 服务器 -> 客户端 的消息 ---
@@ -63,10 +76,9 @@ pub enum ServerMessage {
 
     /// 新的一局开始
     HandStarted {
+        seated_players: VecDeque<PlayerId>,
         /// 本局参与玩家的顺序
         hand_player_order: Vec<PlayerId>,
-        /// 庄家(按钮)位置的玩家ID
-        dealer_id: PlayerId,
     },
 
     /// 玩家执行了一个动作
@@ -74,7 +86,7 @@ pub enum ServerMessage {
         player_id: PlayerId,
         action: PlayerAction,
         /// 执行动作后，该玩家在本轮的总下注额
-        total_bet_this_round: u32,
+        total_bet: u32,
         /// 执行动作后，该玩家剩余的筹码
         new_stack: u32,
         /// 执行动作后，总奖池金额
@@ -91,6 +103,7 @@ pub enum ServerMessage {
     CommunityCardsDealt {
         phase: GamePhase, // Flop, Turn, or River
         cards: Vec<Card>,
+        last_bet: u32,
     },
 
     /// 返还未被跟注的筹码

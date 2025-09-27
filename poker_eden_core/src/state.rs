@@ -9,44 +9,47 @@ pub type PlayerId = Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameState {
+    // ！房间加入时同步的状态
     pub room_id: RoomId,
     pub players: HashMap<PlayerId, Player>,  // 可以根据player id查找player
+    pub small_blind: u32, // 小盲注金额
+    pub big_blind: u32, // 大盲注金额
+    pub seats: u8, // 房间总座位数
+
+    // ！本局开始时同步的状态
     // 轮换的、包含所有就座玩家的列表。每局开始时轮换。
     pub seated_players: VecDeque<PlayerId>,
     // 当前牌局的玩家顺序，不包含观战者
-    #[serde(skip)]
     pub hand_player_order: Vec<PlayerId>,
     // 方便通过PlayerId快速查找其在hand_player_order中的索引
-    #[serde(skip)]
     pub player_indices: HashMap<PlayerId, usize>,
-
-    pub phase: GamePhase,
-    pub pot: u32,  // 总奖池金额
-    // 对于服务端，此向量在内存中。
-    // 对于客户端，这里长度为5，未翻开的牌是None。
-    pub community_cards: Vec<Option<Card>>,
     // 服务端持有的完整牌堆，不会发给客户端。
     #[serde(skip)] // 确保deck不会被序列化发给客户端
     pub(crate) deck: Vec<Card>,
 
+    // ！游戏过程中随时同步的状态
+    pub phase: GamePhase,
+    // 总奖池金额
+    pub pot: u32,
+    // 每个玩家的总下注额，其索引对应 hand_player_order 中的索引
+    pub bets: Vec<u32>,
+
+    // 公共牌数组，长度为5。已发的牌是 Some(card)，未发的牌是 None
+    pub community_cards: Vec<Option<Card>>,
     // 服务端存有所有玩家的真实底牌 (Some(c1), Some(c2))
     // 客户端只知道自己的真实底牌，其他玩家的底牌为 (None, None)
     // 玩家手牌，其索引对应 hand_player_order 中的索引
     pub player_cards: Vec<(Option<Card>, Option<Card>)>,
-    // 每个玩家的总下注额，其索引对应 hand_player_order 中的索引
-    pub bets: Vec<u32>,
+
+    // ！游戏中间变量
     // 在每轮下注开始时重置为 all false
     // 当玩家加注时，其他人的此状态会被重置为 false
     #[serde(skip)]
     pub(crate) player_has_acted: Vec<bool>,
-
     pub cur_player_idx: usize,  // 当前应该行动的玩家在 hand_player_order 中的索引
     pub max_bet: u32, // 下注的最高金额
+    pub last_bet: u32, // 上轮最终下注金额
     pub last_raise_amount: u32,  // 最小加注额
-
-    pub small_blind: u32, // 小盲注金额
-    pub big_blind: u32, // 大盲注金额
-    pub seats: u8, // 房间总座位数
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -139,6 +142,7 @@ impl Default for GameState {
             player_has_acted: vec![],
             cur_player_idx: 0,
             max_bet: 0,
+            last_bet: 0,
             last_raise_amount: 0,
             small_blind: 100,
             big_blind: 200,

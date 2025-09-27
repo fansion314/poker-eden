@@ -48,30 +48,26 @@ struct App {
     share_info: Option<String>,
     /// 客户端自己的玩家ID。
     my_id: Option<PlayerId>,
-    /// 客户端本身是否是房主。
-    is_host: bool,
     /// 房主ID
     host_id: Option<PlayerId>,
-    /// 牌局中当前的庄家ID
-    dealer_id: Option<PlayerId>,
 
-    /// 上一轮下注的玩家下注金额
-    last_bets: Vec<u32>,
+    // 游戏过程中的状态
     /// 客户端当前的牌型
     hand_ranks: Vec<Option<HandRank>>,
-    /// 上一局赢的筹码
-    last_win_stack: Vec<u32>,
+    /// 上一局的筹码
+    last_stack: Vec<u32>,
+    /// 当轮到自己行动时，服务器会发送过来当前合法的动作列表。
+    valid_actions: Vec<PlayerActionType>,
 
     /// 用户在输入框中输入的当前文本。
     input: String,
-    /// 当轮到自己行动时，服务器会发送过来当前合法的动作列表。
-    valid_actions: Vec<PlayerActionType>,
     /// 从服务器收到的最后一条错误信息或提示信息。
-    last_error: Option<String>,
+    last_msg: Option<String>,
     /// 是否显示日志视图的标志。
     show_log: bool,
     /// 存储所有发送和接收的原始消息，用于调试。
     log_messages: Vec<String>,
+    should_refresh: bool,  // 是否需要刷新UI
 }
 
 impl Default for App {
@@ -83,17 +79,15 @@ impl Default for App {
             msg_sender: None,
             share_info: None,
             my_id: None,
-            is_host: false, // 默认不是房主
             host_id: None,
-            dealer_id: None,
-            last_bets: vec![],
             hand_ranks: vec![],
-            last_win_stack: vec![],
+            last_stack: vec![],
             input: String::new(),
             valid_actions: vec![],
-            last_error: None,
+            last_msg: None,
             show_log: false,
             log_messages: Vec::new(),
+            should_refresh: true,
         }
     }
 }
@@ -135,7 +129,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
                                     let (server_addr, initial_msg) = match login_cmd {
                                         LoginCommand::Create { server_addr, nickname } => {
-                                            app_guard.is_host = true; // 设置客户端为房主
                                             (server_addr, ClientMessage::CreateRoom { nickname })
                                         }
                                         LoginCommand::Join { server_addr, room_id, nickname } => {
@@ -185,7 +178,7 @@ async fn network_task(app: Arc<Mutex<App>>, tx: mpsc::Sender<ClientMessage>, mut
         Ok((stream, _)) => stream,
         Err(e) => {
             let mut app_guard = app.lock().unwrap();
-            app_guard.last_error = Some(format!("连接服务器失败: {}", e));
+            app_guard.last_msg = Some(format!("连接服务器失败: {}", e));
             return;
         }
     };
@@ -199,7 +192,7 @@ async fn network_task(app: Arc<Mutex<App>>, tx: mpsc::Sender<ClientMessage>, mut
                 app.lock().unwrap().log_messages.push(format!("[SEND_TO_SERVER] {}", msg_text));
                 if ws_sender.send(tokio_tungstenite::tungstenite::Message::Text(msg_text.into())).await.is_err() {
                     let mut app_guard = app.lock().unwrap();
-                    app_guard.last_error = Some("与服务器的连接已断开。".to_string());
+                    app_guard.last_msg = Some("与服务器的连接已断开。".to_string());
                     break;
                 }
             }
@@ -215,7 +208,7 @@ async fn network_task(app: Arc<Mutex<App>>, tx: mpsc::Sender<ClientMessage>, mut
                     }
                 } else if msg.is_close() {
                     let mut app_guard = app.lock().unwrap();
-                    app_guard.last_error = Some("服务器已关闭连接。".to_string());
+                    app_guard.last_msg = Some("服务器已关闭连接。".to_string());
                     break;
                 }
             }
@@ -227,7 +220,8 @@ async fn network_task(app: Arc<Mutex<App>>, tx: mpsc::Sender<ClientMessage>, mut
 /// 处理从服务器收到的消息，并据此更新应用程序的状态。
 fn handle_server_message(app: &mut App, msg: ServerMessage) -> Vec<ClientMessage> {
     let mut ret_msgs = vec![];
-    app.last_error = None; // 收到任何消息都清除上一条错误
+    app.last_msg = None; // 收到任何消息都清除上一条错误
+    app.should_refresh = true;
     match msg {
         // 成功加入房间后，将UI状态切换到 InRoom
         ServerMessage::RoomJoined { your_id, game_state, host_id, .. } => {
@@ -236,8 +230,12 @@ fn handle_server_message(app: &mut App, msg: ServerMessage) -> Vec<ClientMessage
             app.host_id = Some(host_id);
             app.ui_state = ClientUiState::InRoom; // 切换UI状态
 
+            let playing_num = game_state.hand_player_order.len();
+            app.hand_ranks = vec![None; playing_num];
+            app.last_stack = vec![0; playing_num];
+
             // 如果是房主，生成分享链接
-            if app.is_host {
+            if app.my_id == app.host_id {
                 let share_addr = app.server_addr.as_ref().cloned().unwrap_or_default();
                 app.share_info = Some(format!("分享信息: join {} {}", share_addr, game_state.room_id));
             }
@@ -258,12 +256,15 @@ fn handle_server_message(app: &mut App, msg: ServerMessage) -> Vec<ClientMessage
                     // 如果玩家不在就座列表，则加入
                     if let Some(idx) = gs.seated_players.iter().position(|p| *p == player.id) {
                         gs.seated_players.remove(idx);
+                        if let Some(i) = gs.player_indices.get(&player.id) {
+                            app.last_stack[*i] = player.stack;
+                        }
                     }
                     app.log_messages.push(format!("玩家 {} 已坐下准备游戏", player.nickname));
                     gs.seated_players.insert(gs.find_insertion_index(player.seat_id.unwrap()), player.id);
                 } else if player.state == PlayerState::SittingOut {
                     // 如果玩家在就座列表，则移除
-                    app.log_messages.push(format!("玩家 {} 暂时离席", player.nickname));
+                    app.log_messages.push(format!("玩家 {} 离席", player.nickname));
                     if let Some(idx) = gs.seated_players.iter().position(|id| id == &player.id) {
                         gs.seated_players.remove(idx);
                     }
@@ -275,26 +276,19 @@ fn handle_server_message(app: &mut App, msg: ServerMessage) -> Vec<ClientMessage
                 }
             }
         }
-        ServerMessage::HandStarted { hand_player_order, dealer_id } => {
+        ServerMessage::HandStarted { seated_players, hand_player_order } => {
             if let Some(gs) = &mut app.game_state {
-                if !app.last_win_stack.is_empty() {
-                    for (idx, p) in gs.hand_player_order.iter().enumerate() {
-                        gs.players.get_mut(&p).unwrap().stack += app.last_win_stack[idx];
-                    }
-                }
-
                 app.share_info = None; // 游戏开始后清除分享信息
-                app.dealer_id = Some(dealer_id);
+                gs.seated_players = seated_players;
                 gs.hand_player_order = hand_player_order;
                 gs.player_indices = gs.hand_player_order.iter().enumerate().map(|(i, id)| (*id, i)).collect();
                 gs.phase = GamePhase::PreFlop;
                 gs.pot = 0;
                 gs.bets = vec![0; gs.hand_player_order.len()];
+                gs.last_bet = 0;
                 gs.community_cards = vec![None; 5];
                 gs.player_cards = vec![(None, None); gs.hand_player_order.len()];
-                app.last_bets = vec![0; gs.hand_player_order.len()];
                 app.hand_ranks = vec![None; gs.hand_player_order.len()];
-                app.last_win_stack = vec![0; gs.hand_player_order.len()];
                 for p in gs.players.values_mut() {
                     if gs.hand_player_order.contains(&p.id) { p.state = PlayerState::Playing; }
                 }
@@ -305,6 +299,9 @@ fn handle_server_message(app: &mut App, msg: ServerMessage) -> Vec<ClientMessage
                         }
                     }
                 }
+                app.last_stack = gs.hand_player_order.iter().map(|p| {
+                    gs.players.get(&p).unwrap().stack
+                }).collect();
                 ret_msgs.push(ClientMessage::GetMyHand);
             }
         }
@@ -315,7 +312,7 @@ fn handle_server_message(app: &mut App, msg: ServerMessage) -> Vec<ClientMessage
                 }
             }
         }
-        ServerMessage::PlayerActed { player_id, action, total_bet_this_round, new_stack, new_pot } => {
+        ServerMessage::PlayerActed { player_id, action, total_bet: total_bet_this_round, new_stack, new_pot } => {
             if let Some(gs) = &mut app.game_state {
                 gs.pot = new_pot;
                 if let Some(p_idx) = gs.player_indices.get(&player_id) {
@@ -337,7 +334,7 @@ fn handle_server_message(app: &mut App, msg: ServerMessage) -> Vec<ClientMessage
             }
             if app.my_id == Some(player_id) { app.valid_actions = valid_actions; } else { app.valid_actions.clear(); }
         }
-        ServerMessage::CommunityCardsDealt { phase, cards } => {
+        ServerMessage::CommunityCardsDealt { phase, cards, last_bet } => {
             if let Some(gs) = &mut app.game_state {
                 gs.phase = phase;
                 let start_idx = match phase {
@@ -346,7 +343,7 @@ fn handle_server_message(app: &mut App, msg: ServerMessage) -> Vec<ClientMessage
                     GamePhase::River => 4,
                     _ => return vec![],
                 };
-                app.last_bets = gs.bets.clone();
+                gs.last_bet = last_bet;
                 if gs.community_cards.is_empty() { gs.community_cards = vec![None; 5]; }
                 for (i, card) in cards.into_iter().enumerate() { gs.community_cards[start_idx + i] = Some(card); }
 
@@ -371,7 +368,7 @@ fn handle_server_message(app: &mut App, msg: ServerMessage) -> Vec<ClientMessage
                 for result in results {
                     if let Some(p) = gs.players.get_mut(&result.player_id) {
                         if result.winnings > 0 {
-                            app.last_win_stack[gs.player_indices[&result.player_id]] = result.winnings;
+                            p.stack += result.winnings;
                             p.wins += 1;
                         }
                     }
@@ -381,9 +378,9 @@ fn handle_server_message(app: &mut App, msg: ServerMessage) -> Vec<ClientMessage
                         app.hand_ranks[*p_idx] = Some(hand_rank);
                     }
                 }
-                for (p_idx, p) in gs.hand_player_order.iter().enumerate() {
+                for p in gs.hand_player_order.iter() {
                     if let Some(p) = gs.players.get_mut(p) {
-                        if p.stack + app.last_win_stack[p_idx] == 0 {
+                        if p.stack == 0 {
                             p.losses += 1;
                             p.state = PlayerState::Offline;
                         };
@@ -399,7 +396,7 @@ fn handle_server_message(app: &mut App, msg: ServerMessage) -> Vec<ClientMessage
                 gs.pot -= amount;
             }
         }
-        ServerMessage::Error { message } | ServerMessage::Info { message } => app.last_error = Some(message),
+        ServerMessage::Error { message } | ServerMessage::Info { message } => app.last_msg = Some(message),
     }
     ret_msgs
 }
@@ -438,7 +435,7 @@ fn parse_in_room_input(input: &str, app: &App) -> Option<ClientMessage> {
     });
 
     // 检查是否为房主、已就座、在等待阶段，以解析 "start" 命令
-    if app.is_host && is_seated && parts[0].to_lowercase() == "start"
+    if app.my_id == app.host_id && is_seated && parts[0].to_lowercase() == "start"
         && app.game_state.as_ref().map_or(false, |gs| {
         gs.phase == GamePhase::WaitingForPlayers || gs.phase == GamePhase::Showdown
     }) {
@@ -461,10 +458,22 @@ fn parse_in_room_input(input: &str, app: &App) -> Option<ClientMessage> {
         return match parts[0].to_lowercase().as_str() {
             "f" | "fold" => Some(PlayerAction::Fold.into()),
             "c" | "check" | "call" => {
-                // `Call` action covers both checking and calling
-                if app.valid_actions.iter().any(|a| matches!(a, PlayerActionType::Check | PlayerActionType::Call(_))) {
-                    Some(PlayerAction::Call.into())
-                } else { None }
+                let mut is_check = false;
+                let mut is_call = false;
+                for valid_action in app.valid_actions.iter() {
+                    match valid_action {
+                        PlayerActionType::Check => {
+                            is_check = true;
+                            break;
+                        }
+                        PlayerActionType::Call(_) => {
+                            is_call = true;
+                            break;
+                        }
+                        _ => continue,
+                    }
+                }
+                if is_check { Some(PlayerAction::Check.into()) } else if is_call { Some(PlayerAction::Call.into()) } else { None }
             }
             "b" | "r" | "bet" | "raise" => {
                 if parts.len() > 1 {
@@ -520,12 +529,12 @@ fn draw_login_screen<B: Backend>(f: &mut Frame<B>, app: &App) {
         .alignment(Alignment::Left);
     f.render_widget(instructions, chunks[1]);
 
-    let input_text = if let Some(err) = &app.last_error {
+    let input_text = if let Some(err) = &app.last_msg {
         err.as_str()
     } else {
         app.input.as_ref()
     };
-    let input_style = if app.last_error.is_some() {
+    let input_style = if app.last_msg.is_some() {
         Style::default().fg(Color::Red)
     } else {
         Style::default().fg(Color::Yellow)
@@ -536,7 +545,7 @@ fn draw_login_screen<B: Backend>(f: &mut Frame<B>, app: &App) {
         .block(Block::default().borders(Borders::ALL).title("输入").border_type(BorderType::Rounded));
     f.render_widget(input, chunks[2]);
 
-    if app.last_error.is_none() {
+    if app.last_msg.is_none() {
         f.set_cursor(chunks[2].x + app.input.len() as u16 + 1, chunks[2].y + 1);
     }
 }
@@ -548,16 +557,17 @@ fn draw_ingame_screen<B: Backend>(f: &mut Frame<B>, app: &mut App) {
         .margin(1)
         .constraints([
             Constraint::Length(3), Constraint::Length(5), Constraint::Min(10),
-            if app.share_info.is_some() || app.last_error.is_some() { Constraint::Length(4) } else { Constraint::Length(3) },
+            if app.share_info.is_some() || app.last_msg.is_some() { Constraint::Length(4) } else { Constraint::Length(3) },
             Constraint::Length(3),
         ].as_ref())
         .split(f.size());
 
-    if let Some(gs) = &app.game_state {
+    if let Some(_) = &app.game_state {
         draw_top_info(f, app, chunks[0]);
-        draw_community_cards(f, gs, chunks[1]);
+        draw_community_cards(f, app, chunks[1]);
         draw_players_table(f, app, chunks[2]);
         draw_actions_and_input(f, app, chunks[3], chunks[4]);
+        if app.should_refresh { app.should_refresh = false; }
     } else {
         let block = Block::default().title("正在加载房间信息...").borders(Borders::ALL);
         f.render_widget(block, f.size());
@@ -597,16 +607,17 @@ fn draw_top_info<B: Backend>(f: &mut Frame<B>, app: &App, area: Rect) {
     f.render_widget(pot_paragraph, inner_chunks[1]);
 }
 
-fn draw_community_cards<B: Backend>(f: &mut Frame<B>, gs: &GameState, area: Rect) {
+fn draw_community_cards<B: Backend>(f: &mut Frame<B>, app: &App, area: Rect) {
+    let Some(gs) = &app.game_state else { return };
     let text = if gs.phase == GamePhase::WaitingForPlayers {
         Spans::from(vec![])
     } else {
         let cards_str: Vec<String> = gs.community_cards.iter()
             .map(|c| c.map_or("___".to_string(), |card| {
-                if rand::random_bool(0.03) { "___".to_string() } else { card.to_string() }
+                if app.should_refresh { "___".to_string() } else { card.to_string() }
             })).collect();
         Spans::from(
-            cards_str.join(" ").split_whitespace().map(|s| {
+            cards_str.into_iter().map(|s| {
                 let color = if s.contains('♥') || s.contains('♦') { Color::Red } else { Color::Black };
                 Span::styled(format!(" {} ", s), Style::default().fg(color).bg(Color::White).add_modifier(Modifier::BOLD))
             }).collect::<Vec<Span>>(),
@@ -626,7 +637,8 @@ fn draw_players_table<B: Backend>(f: &mut Frame<B>, app: &App, area: Rect) {
     let header_cells = ["座位", "玩家", "胜", "负", "筹码", "下注", "手牌", "牌型", "状态"]
         .iter().map(|h| Cell::from(*h).style(Style::default().fg(Color::Yellow)));
     let header = Row::new(header_cells).style(Style::default().bg(Color::DarkGray));
-    let dealer_id = app.dealer_id; // 庄家是就座列表的第一个
+    let dealer_id = if gs.hand_player_order.is_empty() { None } else { Some(gs.hand_player_order[0]) }; // 庄家是就座列表的第一个
+    let show_stack_change = gs.phase == GamePhase::Showdown && !app.last_stack.iter().all(|x| *x == 0);
     let rows = gs.seated_players.iter().map(|player_id| {
         let Some(player) = gs.players.get(player_id) else {
             return Row::new(vec![Cell::from("Error: Player not found")]);
@@ -636,22 +648,28 @@ fn draw_players_table<B: Backend>(f: &mut Frame<B>, app: &App, area: Rect) {
         let is_thinking = gs.phase != GamePhase::Showdown && gs.current_player_id() == Some(*player_id);
         let p_idx_opt = gs.player_indices.get(player_id);
         let bet = p_idx_opt.map_or(0, |idx| {
-            gs.bets.get(*idx).cloned().unwrap_or(0) - app.last_bets.get(*idx).cloned().unwrap_or(0)
+            gs.bets.get(*idx).cloned().unwrap_or(0).saturating_sub(gs.last_bet)
         });
         let mut player_stack_str = format!("${}", player.stack);
-        if let Some(idx) = p_idx_opt {
-            let win_stack = app.last_win_stack[*idx];
-            if win_stack > 0 {
-                player_stack_str.push_str(format!("(+${})", win_stack).as_str());
+        if show_stack_change && let Some(idx) = p_idx_opt {
+            let change_stack = player.stack as i32 - app.last_stack[*idx] as i32;
+            if change_stack > 0 {
+                player_stack_str.push_str(format!("(+${})", change_stack).as_str());
+            } else if change_stack < 0 {
+                player_stack_str.push_str(format!("(-${})", -change_stack).as_str());
             }
         }
         let cards_tuple = p_idx_opt.map_or((None, None), |idx| gs.player_cards.get(*idx).cloned().unwrap_or((None, None)));
-        let cards_str = match cards_tuple {
-            (Some(c1), Some(c2)) => {
-                if rand::random_bool(0.03) { "[ ___  ___ ]".to_string() } else { format!("[ {}  {} ]", c1, c2) }
+        let cards_spans: Vec<Span> = match cards_tuple {
+            (Some(c1), Some(c2)) if !app.should_refresh => {
+                [c1, c2].into_iter().map(|c| {
+                    let color = if c.suit == Suit::Heart || c.suit == Suit::Diamond { Color::Red } else { Color::Black };
+                    Span::styled(format!(" {} ", c), Style::default().fg(color).bg(Color::White))
+                }).collect()
             }
-            _ => "[ ___  ___ ]".to_string(),
+            _ => vec![Span::styled(" ___  ___ ", Style::default().fg(Color::Black).bg(Color::White))],
         };
+
         let cards_rank = p_idx_opt.map_or("".to_string(), |idx| {
             match app.hand_ranks.get(*idx).unwrap() {
                 None => "".to_string(),
@@ -671,7 +689,7 @@ fn draw_players_table<B: Backend>(f: &mut Frame<B>, app: &App, area: Rect) {
             Cell::from(if player.losses > 0 { format!("{}", player.losses) } else { "".to_string() }),
             Cell::from(player_stack_str),
             Cell::from(format!("${}", bet)),
-            Cell::from(cards_str),
+            Cell::from(Spans::from(cards_spans)),
             Cell::from(cards_rank),
             Cell::from(status_str),
         ]).style(row_style)
@@ -710,7 +728,7 @@ fn draw_actions_and_input<B: Backend>(f: &mut Frame<B>, app: &App, actions_area:
             PlayerActionType::Raise(min_amount) => format!("[r]加注(Raise) ${}+", min_amount),
         }).collect();
         format!("轮到你! {}", parts.join(", "))
-    } else if app.is_host && (is_waiting_phase || is_showdown_phase) {
+    } else if app.my_id == app.host_id && (is_waiting_phase || is_showdown_phase) {
         // Case 2: 你是房主，并且在等待阶段
         let share_info_str = app.share_info.as_deref().unwrap_or("");
         if is_seated {
@@ -731,11 +749,11 @@ fn draw_actions_and_input<B: Backend>(f: &mut Frame<B>, app: &App, actions_area:
         "等待其他玩家行动...".to_string()
     };
 
-    if let Some(err) = &app.last_error {
+    if let Some(err) = &app.last_msg {
         info_text = format!("消息：{}\n{}", err.as_str(), info_text);
     }
 
-    let p_style = if app.last_error.is_some() { Style::default().fg(Color::Red) } else { Style::default().fg(Color::White) };
+    let p_style = if app.last_msg.is_some() { Style::default().fg(Color::Red) } else { Style::default().fg(Color::White) };
     let actions_paragraph = Paragraph::new(info_text.trim_start_matches("\n"))
         .style(p_style)
         .block(Block::default().borders(Borders::ALL).title("可用动作 / 信息").border_type(BorderType::Rounded))

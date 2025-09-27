@@ -13,38 +13,40 @@ impl GameState {
             return 0;
         }
 
-        // 获取队列头部的玩家座位ID作为参考点（锚点）
-        // unwrap是安全的，因为我们已经检查过 is_empty
+        // 获取队列头部的玩家座位ID作为参考点（锚点）。
+        // 所有的比较都将围绕这个锚点进行，以处理循环。
+        // unwrap是安全的，因为我们已经检查过 is_empty。
         let start_sid = self.players.get(&self.seated_players[0]).unwrap().seat_id.unwrap();
 
-        // 使用 position() 查找第一个满足插入条件的索引
-        // 这个闭包的核心逻辑是判断 new_player 是否应该插入到 existing_player 前面
-        let maybe_index = self.seated_players.iter().position(|&existing_id| {
+        if self.seated_players.len() == 1 {
+            return if new_player_seat_id < start_sid { 0 } else { 1 };
+        }
+
+        // 使用 position() 查找第一个满足插入条件的索引。
+        // 插入条件是：`new_player_seat_id` 在循环顺序中应该位于 `existing_sid` 之前。
+        let maybe_index = self.seated_players.iter().skip(1).position(|&existing_id| {
             let existing_player = self.players.get(&existing_id).unwrap();
             let existing_sid = existing_player.seat_id.unwrap();
 
-            // 根据新玩家和现有玩家的 seat_id 相对于 start_sid 的位置来决定逻辑
-            match (new_player_seat_id >= start_sid, existing_sid >= start_sid) {
-                // 情况 A: 新玩家和现有玩家都在锚点的“同一侧”
-                // （都在第一部分或都在第二部分）
-                // 此时直接进行数值比较
-                (true, true) | (false, false) => new_player_seat_id < existing_sid,
+            // 根据新玩家和现有玩家的 seat_id 是否大于等于锚点，判断它们属于哪个逻辑部分。
+            let new_is_in_first_part = new_player_seat_id > start_sid;
+            let existing_is_in_first_part = existing_sid > start_sid;
 
-                // 情况 B: 新玩家在第二部分，现有玩家在第一部分
-                // （例如 start_sid=3, new=1, existing=4)
-                // 逻辑上，第二部分总是在第一部分的后面，所以新玩家应该排在现有玩家 *之前*
-                (false, true) => true,
-
-                // 情况 C: 新玩家在第一部分，现有玩家在第二部分
-                // （例如 start_sid=3, new=4, existing=1)
-                // 逻辑上新玩家排在现有玩家 *之后*，所以我们继续寻找下一个
-                (true, false) => false,
+            if new_is_in_first_part == existing_is_in_first_part {
+                // 情况 A: 两者在同一个逻辑部分（都在锚点之后，或都在锚点之前）。
+                // 此时，直接进行数值大小比较即可。
+                new_player_seat_id < existing_sid
+            } else {
+                // 情况 B: 两者在不同的逻辑部分。
+                // 根据定义，第一部分（>= start_sid）的元素总是在第二部分（< start_sid）的前面。
+                // 因此，如果新玩家在第一部分，那么它就应该排在位于第二部分的现有玩家前面。
+                new_is_in_first_part
             }
         });
 
-        // 情况 2: 如果 position() 找到了索引，就返回它
-        // 情况 3: 如果没找到（返回 None），意味着新玩家在逻辑上是最大的，应该插入到队列末尾
-        maybe_index.unwrap_or(self.seated_players.len())
+        // 如果 position() 找到了一个位置，说明新玩家应该插入到那个位置。
+        // 如果没找到（返回 None），说明新玩家比所有现有玩家都“大”，应该插入到队列的末尾。
+        maybe_index.map(|i| i + 1).unwrap_or(self.seated_players.len())
     }
 }
 
@@ -64,18 +66,21 @@ impl GameState {
     /// # Panics
     /// 如果活跃玩家少于2人，则会 panic，因为游戏无法开始。
     pub fn start_new_hand(&mut self) -> Vec<ServerMessage> {
-        // 外部调用者负责旋转庄家按钮
-        // state.seated_players.rotate_left(1);
-
         let mut messages = Vec::new();
 
+
         // 在新一局开始前，将所有离线玩家的状态变更为离席
-        for player_id in self.seated_players.iter() {
+        let mut sitting_out_indices = vec![];
+        for (i, player_id) in self.seated_players.iter().enumerate() {
             if let Some(p) = self.players.get_mut(player_id) {
                 if p.state == PlayerState::Offline || p.stack == 0 {
                     p.state = PlayerState::SittingOut;
+                    sitting_out_indices.push(i);
                 }
             }
+        }
+        for i in sitting_out_indices.iter().rev() {
+            self.seated_players.remove(*i);
         }
 
         // 验证游戏开始的条件 (从轮换后的新顺序中过滤)
@@ -106,15 +111,15 @@ impl GameState {
 
         // 发送新牌局开始的消息
         messages.push(ServerMessage::HandStarted {
+            seated_players: self.seated_players.clone(),
             hand_player_order: self.hand_player_order.clone(),
-            // 庄家总是 hand_player_order 的第一个
-            dealer_id: self.hand_player_order[0],
         });
 
         // 重置状态
         self.pot = 0;
         self.community_cards = vec![None; 5];
         self.max_bet = 0;
+        self.last_bet = 0;
 
         // 初始化基于Vec的结构
         self.player_cards = vec![(None, None); active_player_count];
@@ -125,8 +130,7 @@ impl GameState {
         self.last_raise_amount = self.big_blind;
 
         // 洗牌
-        let total_cards_needed = active_player_count * 2 + 5;
-        self.deck = generate_random_hand(total_cards_needed);
+        self.deck = generate_random_hand(active_player_count);
 
         // 发底牌并设置玩家状态
         for (idx, player_id) in self.hand_player_order.iter().enumerate() {
@@ -175,7 +179,7 @@ impl GameState {
         messages.push(ServerMessage::PlayerActed {
             player_id: sb_id,
             action: PlayerAction::BetOrRaise(sb_amount),
-            total_bet_this_round: self.bets[sb_idx],
+            total_bet: self.bets[sb_idx],
             new_stack: self.players.get(&sb_id).unwrap().stack,
             new_pot: self.pot,
         });
@@ -194,7 +198,7 @@ impl GameState {
         messages.push(ServerMessage::PlayerActed {
             player_id: bb_id,
             action: PlayerAction::BetOrRaise(bb_amount),
-            total_bet_this_round: self.bets[bb_idx],
+            total_bet: self.bets[bb_idx],
             new_stack: self.players.get(&bb_id).unwrap().stack,
             new_pot: self.pot,
         });
@@ -252,6 +256,7 @@ impl GameState {
 
             // 调用 handle_player_action 并捕获其返回的消息
             let messages = self.handle_player_action(player_id, action);
+            self.players.get_mut(&player_id).unwrap().state = PlayerState::Offline;
             (true, messages)
         } else {
             (false, vec![])
@@ -395,7 +400,7 @@ impl GameState {
         messages.push(ServerMessage::PlayerActed {
             player_id,
             action, // 将传入的 action 克隆或复制到消息中
-            total_bet_this_round: self.bets[player_idx],
+            total_bet: self.bets[player_idx],
             new_stack: player.stack,
             new_pot: self.pot,
         });
@@ -440,7 +445,7 @@ impl GameState {
             current_idx = (current_idx + 1) % self.hand_player_order.len();
             let next_player_id = self.hand_player_order[current_idx];
             if let Some(player) = self.players.get(&next_player_id) {
-                if player.state == PlayerState::Playing && !self.player_has_acted[current_idx] {
+                if (player.state == PlayerState::Playing || player.state == PlayerState::Offline) && !self.player_has_acted[current_idx] {
                     // 找到后...
                     self.cur_player_idx = current_idx;
                     let need_call_amount = self.max_bet - self.bets[current_idx];
@@ -457,7 +462,7 @@ impl GameState {
                 }
             }
         }
-        vec![]
+        vec![ServerMessage::Error { message: "没有可以行动的下一个玩家".to_string() }]
     }
 
     /// 检查当前下注轮是否结束
@@ -513,6 +518,7 @@ impl GameState {
         self.player_has_acted.fill(false);
         // 重置最小加注额为大盲注，用于下一轮下注
         self.last_raise_amount = self.big_blind;
+        self.last_bet = self.max_bet;
 
         fn preflop_to_flop(state: &mut GameState, messages: &mut Vec<ServerMessage>) {
             state.phase = GamePhase::Flop;
@@ -523,6 +529,7 @@ impl GameState {
             messages.push(ServerMessage::CommunityCardsDealt {
                 phase: state.phase,
                 cards: vec![c1, c2, c3],
+                last_bet: state.last_bet,
             });
         }
 
@@ -533,6 +540,7 @@ impl GameState {
             messages.push(ServerMessage::CommunityCardsDealt {
                 phase: state.phase,
                 cards: vec![c],
+                last_bet: state.last_bet,
             });
         }
 
@@ -543,6 +551,7 @@ impl GameState {
             messages.push(ServerMessage::CommunityCardsDealt {
                 phase: state.phase,
                 cards: vec![c],
+                last_bet: state.last_bet,
             });
         }
 
@@ -1552,7 +1561,7 @@ mod tests {
         // 验证p0已弃牌
         assert_eq!(
             state.players.get(&p0_id).unwrap().state,
-            PlayerState::Folded
+            PlayerState::Offline
         );
 
         // 验证行动权成功转移给了p1
@@ -1640,7 +1649,7 @@ mod tests {
         );
         // BB All-in 150
         assert!(
-            matches!(messages[2], ServerMessage::PlayerActed { player_id, new_stack: 0, total_bet_this_round: 150, .. } if player_id == p_bb)
+            matches!(messages[2], ServerMessage::PlayerActed { player_id, new_stack: 0, total_bet: 150, .. } if player_id == p_bb)
         );
         // 轮到 SB 行动
         assert!(matches!(messages[3], ServerMessage::NextToAct { player_id, .. } if player_id == p_sb));
@@ -1658,16 +1667,16 @@ mod tests {
         );
         // 验证公共牌
         assert!(
-            matches!(messages[1].clone(), ServerMessage::CommunityCardsDealt { phase: GamePhase::Flop, cards } if cards.len() == 3)
+            matches!(messages[1].clone(), ServerMessage::CommunityCardsDealt { phase: GamePhase::Flop, cards, .. } if cards.len() == 3)
         );
         assert!(
-            matches!(messages[2].clone(), ServerMessage::CommunityCardsDealt { phase: GamePhase::Turn, cards } if cards.len() == 1)
+            matches!(messages[2].clone(), ServerMessage::CommunityCardsDealt { phase: GamePhase::Turn, cards, .. } if cards.len() == 1)
         );
         assert!(
-            matches!(messages[3].clone(), ServerMessage::CommunityCardsDealt { phase: GamePhase::River, cards } if cards.len() == 1)
+            matches!(messages[3].clone(), ServerMessage::CommunityCardsDealt { phase: GamePhase::River, cards, .. } if cards.len() == 1)
         );
         assert!(
-            matches!(messages[4].clone(), ServerMessage::BetReturned { player_id, amount: 50, new_stack: 9850 } if player_id == p_sb)
+            matches!(messages[4].clone(), ServerMessage::BetReturned { player_id, amount: 50, new_stack: 9850, .. } if player_id == p_sb)
         );
 
         // 验证摊牌

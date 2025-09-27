@@ -14,7 +14,7 @@ use axum::{
 use dashmap::DashMap;
 use futures_util::{stream::StreamExt, SinkExt};
 use tokio::sync::mpsc;
-use tracing::{debug, info};
+use tracing::info;
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
@@ -257,10 +257,19 @@ async fn handle_client_message(
                             }
                         }
                         ClientMessage::RequestSeat { seat_id, stack } => {
-                            if (room.game_state.phase == GamePhase::WaitingForPlayers || room.game_state.phase == GamePhase::Showdown)
-                                && !room.game_state.players.values().any(|p| p.seat_id == Some(seat_id))
-                                && seat_id < room.game_state.seats
-                            {
+                            if !(room.game_state.phase == GamePhase::WaitingForPlayers || room.game_state.phase == GamePhase::Showdown) {
+                                only_messages.push(ServerMessage::Error { message: "入座失败：请在等待阶段入座".to_string() });
+                                vec![]
+                            } else if seat_id >= room.game_state.seats {
+                                only_messages.push(ServerMessage::Error { message: "入座失败：座位号超出最大座位数".to_string() });
+                                vec![]
+                            } else if room.game_state.players.values().any(|p| p.seat_id == Some(seat_id) && p.id != *player_id) {
+                                only_messages.push(ServerMessage::Error { message: "入座失败：该位置已有玩家入座".to_string() });
+                                vec![]
+                            } else {
+                                if let Some(idx) = room.game_state.seated_players.iter().position(|p| *p == *player_id) {
+                                    room.game_state.seated_players.remove(idx);
+                                }
                                 let p = {
                                     let p = room.game_state.players.get_mut(&player_id).unwrap();
                                     p.stack = stack;
@@ -268,17 +277,19 @@ async fn handle_client_message(
                                     p.state = PlayerState::Waiting;
                                     p.clone()
                                 };
-
                                 let sid = room.game_state.find_insertion_index(seat_id);
                                 room.game_state.seated_players.insert(sid, p.id);
 
                                 vec![ServerMessage::PlayerUpdated { player: p }]
-                            } else {
-                                vec![ServerMessage::Error { message: "入座失败".to_string() }]
                             }
                         }
                         ClientMessage::PerformAction(action) => {
-                            room.game_state.handle_player_action(*player_id, action)
+                            let mut msg = room.game_state.handle_player_action(*player_id, action);
+                            let rs = room.game_state.tick();
+                            if rs.0 {
+                                msg.extend(rs.1);
+                            }
+                            msg
                         }
                         ClientMessage::GetMyHand => {
                             if room.game_state.phase == GamePhase::PreFlop {

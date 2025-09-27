@@ -7,10 +7,10 @@ use std::fmt;
 /// 花色 (Suit)
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy, Serialize, Deserialize)]
 pub enum Suit {
-    Spade,   // 黑桃 ♠
-    Heart,   // 红心 ♥
-    Club,    // 梅花 ♣
-    Diamond, // 方块 ♦
+    Spade,   // 黑桃 ♠️
+    Heart,   // 红心 ♥️
+    Club,    // 梅花 ♣️
+    Diamond, // 方块 ♦️
 }
 
 /// 点数 (Rank)
@@ -36,8 +36,8 @@ pub enum Rank {
 /// 单张扑克牌 (Card)
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy, Serialize, Deserialize)]
 pub struct Card {
-    rank: Rank,
-    suit: Suit,
+    pub rank: Rank,
+    pub suit: Suit,
 }
 
 impl Card {
@@ -138,12 +138,43 @@ fn create_deck() -> Vec<Card> {
     deck
 }
 
-/// 从一副新牌中随机生成并返回 k 张牌
-pub fn generate_random_hand(k: usize) -> Vec<Card> {
+/// 从一副新牌中随机生成并返回 2*k+5 张牌
+pub fn generate_random_hand(k_players: usize) -> Vec<Card> {
+    // 德州扑克通常支持 2 到 10 名玩家
+    assert!(k_players >= 2 && k_players <= 10, "Number of players must be between 2 and 10.");
+
     let mut deck = create_deck();
     let mut rng = rand::rng();
     deck.shuffle(&mut rng);
-    deck.into_iter().take(k).collect()
+
+    let total_cards = 2 * k_players + 5;
+    let mut cards = vec![Card { rank: Rank::Ace, suit: Suit::Heart }; total_cards];
+
+    for i in 0..2 {
+        for j in 0..k_players {
+            if let Some(card) = deck.pop() {
+                cards[j * 2 + i] = card;
+            }
+        }
+    }
+
+    // 发公共牌 (Community Cards)
+    deck.pop(); // 烧掉一张牌 (Flop burn)
+    for i in (2 * k_players)..(2 * k_players + 3) {
+        if let Some(card) = deck.pop() {
+            cards[i] = card;
+        }
+    }
+    deck.pop(); // 再烧掉一张牌 (Turn burn)
+    if let Some(card) = deck.pop() {
+        cards[2 * k_players + 3] = card;
+    }
+    deck.pop(); // 最后烧掉一张牌 (River burn)
+    if let Some(card) = deck.pop() {
+        cards[2 * k_players + 4] = card;
+    }
+
+    cards
 }
 
 // --- 牌型评估逻辑 ---

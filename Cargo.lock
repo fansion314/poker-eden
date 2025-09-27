@@ -952,7 +952,6 @@ dependencies = [
  "crossterm 0.29.0",
  "futures-util",
  "poker_eden_core",
- "rand",
  "serde_json",
  "tokio",
  "tokio-tungstenite",

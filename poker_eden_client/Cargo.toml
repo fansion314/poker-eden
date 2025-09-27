@@ -14,4 +14,3 @@ url = "2.5"
 crossterm = "0.29"
 tui = "0.19"
 uuid = { workspace = true }
-rand = { workspace = true }
