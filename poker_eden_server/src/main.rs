@@ -294,6 +294,7 @@ async fn handle_client_message(
                                     p.stack = stack;
                                     p.seat_id = Some(seat_id);
                                     p.state = PlayerState::Waiting;
+                                    p.is_offline = false;
                                     p.clone()
                                 };
                                 let sid = room.game_state.find_insertion_index(seat_id);
