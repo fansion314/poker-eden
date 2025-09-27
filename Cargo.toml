@@ -2,6 +2,8 @@
 name = "poker_eden"
 version = "0.1.0"
 edition = "2024"
+authors = ["Peilin Fan <peilin.fan@foxmail.com>"]
+license = "GPL-3"
 
 [workspace]
 members = ["poker_eden_client", "poker_eden_core", "poker_eden_server"]
